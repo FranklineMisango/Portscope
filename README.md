@@ -7,14 +7,13 @@ Interactive exploration of worldwide port activity, live vessel tracking, and pr
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/yourorg/portscope)
 [![System Status](https://img.shields.io/badge/system-stable-green.svg)](https://github.com/yourorg/portscope)
 Issues [(github.com in Bing)](https://www.bing.com/search?q="https%3A%2F%2Fgithub.com%2Fyourorg%2Fportscope%2Fissues")
-`[Looks like the result wasn't safe to show. Let's switch things up and try something else!]`
 Version [(github.com in Bing)](https://www.bing.com/search?q="https%3A%2F%2Fgithub.com%2Fyourorg%2Fportscope%2Freleases")
 
 ---
 
 ## Tech Stack
 
-`https://img.shields.io/badge/Go-00ADD8?style=for-the-badge&logo=go&logoColor=white`
+https://img.shields.io/badge/Go-00ADD8?style=for-the-badge&logo=go&logoColor=white
 `https://img.shields.io/badge/PostgreSQL-336791?style=for-the-badge&logo=postgresql&logoColor=white`
 `https://img.shields.io/badge/PostGIS-006400?style=for-the-badge&logo=postgis&logoColor=white`
 `https://img.shields.io/badge/React-20232A?style=for-the-badge&logo=react&logoColor=61DAFB`
