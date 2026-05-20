@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "portscope.fullname" . }}-postgres
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ include "portscope.fullname" . }}-postgres
+  template:
+    metadata:
+      labels:
+        app: {{ include "portscope.fullname" . }}-postgres
+    spec:
+      containers:
+        - name: postgres
+          image: "{{ .Values.postgres.repository }}:{{ .Values.postgres.tag }}"
+          env:
+            - name: POSTGRES_DB
+              value: "{{ .Values.postgres.database | default "postgres" }}"
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: db-secret
+                  key: username
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: db-secret
+                  key: password
+          ports:
+            - containerPort: 5432
+          volumeMounts:
+            - name: pgdata
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: pgdata
+          persistentVolumeClaim:
+            claimName: {{ include "portscope.fullname" . }}-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "portscope.fullname" . }}-postgres
+spec:
+  ports:
+    - port: 5432
+  selector:
+    app: {{ include "portscope.fullname" . }}-postgres

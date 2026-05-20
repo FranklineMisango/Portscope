@@ -1,0 +1,52 @@
+replicaCount: 1
+image:
+  pullPolicy: IfNotPresent
+
+postgres:
+  enabled: true
+  repository: your-registry/postgres
+  tag: latest
+  pvc:
+    enabled: true
+    size: 10Gi
+
+redis:
+  enabled: true
+  repository: redis
+  tag: 7
+
+api:
+  enabled: true
+  repository: your-registry/portscope-api
+  tag: latest
+  port: 8080
+
+consumer:
+  enabled: true
+  repository: your-registry/portscope-consumer
+  tag: latest
+  port: 9090
+
+frontend:
+  enabled: true
+  repository: your-registry/portscope-frontend
+  tag: latest
+  port: 80
+
+ml:
+  enabled: true
+  repository: your-registry/portscope-ml
+  tag: latest
+  port: 5000
+
+service:
+  type: ClusterIP
+  port: 80
+
+prometheus:
+  enabled: true
+  image: prom/prometheus:latest
+
+grafana:
+  enabled: true
+  image: grafana/grafana:9.0.0

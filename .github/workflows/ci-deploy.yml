@@ -1,0 +1,29 @@
+name: CI Deploy
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  fetch-secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: HashiCorp Vault Login
+        uses: hashicorp/vault-action@v2
+        with:
+          url: ${{ secrets.VAULT_ADDR }}
+          method: token
+          token: ${{ secrets.VAULT_TOKEN }}
+
+      - name: Read secrets
+        id: read
+        run: |
+          vault kv get -format=json secret/data/portscope/ais > secret.json
+          echo "::set-output name=secret::$(jq -r '.data.data' secret.json | jq -c .)"
+
+      - name: Use secrets
+        run: |
+          echo "Secrets fetched"

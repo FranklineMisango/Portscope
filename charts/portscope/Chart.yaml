@@ -1,0 +1,5 @@
+apiVersion: v2
+name: portscope
+description: Helm chart for Portscope
+version: 0.1.0
+appVersion: "0.1.0"

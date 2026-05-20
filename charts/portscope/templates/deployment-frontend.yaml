@@ -1,0 +1,19 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "portscope.fullname" . }}-frontend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: {{ include "portscope.fullname" . }}-frontend
+  template:
+    metadata:
+      labels:
+        app: {{ include "portscope.fullname" . }}-frontend
+    spec:
+      containers:
+        - name: frontend
+          image: "{{ .Values.frontend.repository }}:{{ .Values.frontend.tag }}"
+          ports:
+            - containerPort: {{ .Values.frontend.port }}

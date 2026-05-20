@@ -1,0 +1,19 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "portscope.fullname" . }}-api
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app: {{ include "portscope.fullname" . }}-api
+  template:
+    metadata:
+      labels:
+        app: {{ include "portscope.fullname" . }}-api
+    spec:
+      containers:
+        - name: api
+          image: {{ .Values.image.repository }}-api:{{ .Values.image.tag }}
+          ports:
+            - containerPort: 8080

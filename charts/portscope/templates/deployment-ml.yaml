@@ -1,0 +1,19 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "portscope.fullname" . }}-ml
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ include "portscope.fullname" . }}-ml
+  template:
+    metadata:
+      labels:
+        app: {{ include "portscope.fullname" . }}-ml
+    spec:
+      containers:
+        - name: ml
+          image: "{{ .Values.ml.repository }}:{{ .Values.ml.tag }}"
+          ports:
+            - containerPort: {{ .Values.ml.port }}

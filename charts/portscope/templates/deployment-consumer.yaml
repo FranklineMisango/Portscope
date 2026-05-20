@@ -1,0 +1,30 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "portscope.fullname" . }}-consumer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ include "portscope.fullname" . }}-consumer
+  template:
+    metadata:
+      labels:
+        app: {{ include "portscope.fullname" . }}-consumer
+    spec:
+      containers:
+        - name: consumer
+          image: "{{ .Values.consumer.repository }}:{{ .Values.consumer.tag }}"
+          env:
+            - name: REDIS_ADDR
+              value: "{{ include "portscope.fullname" . }}-redis:6379"
+            - name: POSTGRES_DSN
+              value: "postgres://postgres:$(DB_PASSWORD)@{{ include "portscope.fullname" . }}-postgres:5432/{{ .Values.postgres.database | default "postgres" }}?sslmode=disable"
+          ports:
+            - containerPort: {{ .Values.consumer.port }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.consumer.port }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
