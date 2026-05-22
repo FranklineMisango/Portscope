@@ -2,7 +2,7 @@
 
 # Portscope
 
-Interactive exploration of worldwide port activity, live vessel tracking, and predictive traffic forecasting.
+Interactive exploration of worldwide port activity and chokepoint intensity using local PortWatch datasets.
 
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/yourorg/portscope)
 [![System Status](https://img.shields.io/badge/system-stable-green.svg)](https://github.com/yourorg/portscope)
@@ -27,11 +27,9 @@ https://img.shields.io/badge/Go-00ADD8?style=for-the-badge&logo=go&logoColor=whi
 ## Features
 
 ### Core Capabilities
-- **Interactive Map**: Explore ports worldwide with OpenStreetMap layers.
-- **Live AIS Tracking**: Real-time vessel positions via [aisstream.io](https://aisstream.io).
-- **Historical Queries**: Retrieve traffic logs for 30 days, 1 year, or 2 years.
-- **Predictive Analytics**: ML pipeline forecasts arrivals/departures.
-- **Geospatial Intelligence**: PostGIS queries for density, proximity, and clustering.
+- **Interactive Map**: Explore ports and chokepoints on a dark, IMF-style map.
+- **Local PortWatch Data**: Ports and chokepoints load from checked-in GeoJSON files.
+- **Click-through Metrics**: Select a marker to see the PortWatch page ID and metrics.
 - **Containerized Deployment**: Dockerized microservices with Kubernetes scaling.
 
 ### Advanced Analytics
@@ -51,7 +49,7 @@ https://img.shields.io/badge/Go-00ADD8?style=for-the-badge&logo=go&logoColor=whi
 [Go API Gateway] ----> [Redis Cache]
         |
         v
-[PostgreSQL + PostGIS] <---- [Kafka/Redis Streams] <---- [AIS Feeds: aisstream.io, AISHub]
+[PostgreSQL + PostGIS] <---- [ArcGIS Daily Feeds]
         |
         v
 [ML Microservice: Python/ML.NET]
@@ -66,7 +64,8 @@ https://img.shields.io/badge/Go-00ADD8?style=for-the-badge&logo=go&logoColor=whi
 
 | Table            | Purpose                  | Key Fields |
 |------------------|--------------------------|------------|
-| **ports**        | Port metadata + polygons | id, name, country, geom |
+| **ports**        | Port metadata + polygons | id, name, country, iso3, observed_on, metrics, geom |
+| **chokepoints**  | Daily chokepoint data    | id, name, observed_on, metrics, geom |
 | **ships**        | Vessel registry          | imo, mmsi, type, flag, tonnage |
 | **traffic_logs** | Arrivals/departures      | port_id, ship_id, timestamp, event_type |
 | **ais_messages** | Raw AIS feed             | mmsi, lat, lon, speed, heading, timestamp |
@@ -79,8 +78,9 @@ Indexes:
 
 ## API Endpoints
 
+- `GET /ports` → Daily ports feed
+- `GET /chokepoints` → Daily chokepoints feed
 - `GET /port/{id}/traffic?range=30d` → Historical traffic
-- `GET /port/{id}/live` → Live analytics
 - `GET /port/{id}/forecast` → Predictive arrivals/departures
 
 ---
@@ -95,15 +95,15 @@ cd portscope
 
 ### Configure environment
 ```env
-AISSTREAM_API_KEY=your_api_key_here
 POSTGRES_USER=postgres
 POSTGRES_PASSWORD=postgres
 POSTGRES_DB=portscope
+DATA_REFRESH_INTERVAL=6h
 ```
 
 ### Run with Docker
 ```bash
-docker-compose up --build
+docker compose -f ingest/docker-compose.yml up --build --force-recreate
 ```
 
 ### Access the app
@@ -111,21 +111,28 @@ docker-compose up --build
 - API: `http://localhost:8080`
 - Grafana: `http://localhost:3001`
 
+### If you still see the old AIS UI
+```bash
+docker compose -f ingest/docker-compose.yml down -v --remove-orphans
+docker compose -f ingest/docker-compose.yml up --build --force-recreate
+```
+
+If you hit `relation "ports" does not exist`, the DB volume already existed before the migrations mount was added. Use the `down -v` command above once to recreate it.
+
 ---
 
 ## Example Workflow
 
 1. Open the map → see global ports.
-2. Click **Shanghai** → fetch traffic logs + live AIS feed.
-3. View charts: arrivals, departures, cargo breakdown.
-4. Overlay ship density heatmaps.
-5. Forecast next 7 days traffic.
+2. Click a port or chokepoint → inspect daily metrics.
+3. View the map and compare port activity across regions.
+4. Refresh the ArcGIS feeds on the schedule you set.
 
 ---
 
 ## Roadmap
 
-- [x] AIS ingestion pipeline
+- [x] ArcGIS daily feed ingestion
 - [x] PostGIS schema for ports and ships
 - [x] Interactive map frontend
 - [ ] Advanced ML forecasting

@@ -8,6 +8,8 @@ services:
     image: postgis/postgis:15-3.3
     environment:
       POSTGRES_PASSWORD: postgres
+    volumes:
+      - pgdata:/var/lib/postgresql/data
     ports:
       - "5432:5432"
     healthcheck:
@@ -15,6 +17,33 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+
+  db-migrate:
+    image: postgis/postgis:15-3.3
+    environment:
+      PGPASSWORD: postgres
+      POSTGRES_DSN: postgres://postgres:postgres@db:5432/postgres?sslmode=disable
+    volumes:
+      - ./migrations:/migrations:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    command:
+      - /bin/sh
+      - -c
+      - |
+        echo "waiting for db..."
+        until pg_isready -h db -U postgres; do
+          echo "waiting for db"
+          sleep 1
+        done
+        for f in /migrations/*.sql; do
+          [ -f "$$f" ] || continue
+          echo "applying $$f"
+          psql -h db -U postgres -d postgres -v ON_ERROR_STOP=1 -f "$$f" || exit 1
+        done
+        echo "all migrations applied successfully"
+
   prometheus:
     image: prom/prometheus:latest
     volumes:
@@ -51,22 +80,40 @@ services:
     depends_on:
       - redis
       - db
+      - db-migrate
     ports:
       - "9091:9090"
+
+  dataset-sync:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      - POSTGRES_DSN=postgres://postgres:postgres@db:5432/postgres?sslmode=disable
+      - DATA_REFRESH_INTERVAL=${DATA_REFRESH_INTERVAL:-6h}
+      - PORTWATCH_PORT_LIMIT=${PORTWATCH_PORT_LIMIT:-120}
+      - PORTWATCH_CHOKEPOINT_LIMIT=${PORTWATCH_CHOKEPOINT_LIMIT:-24}
+    depends_on:
+      - db
+      - db-migrate
 
   api:
     build:
       context: ../api
       dockerfile: Dockerfile
-    ports:
-      - "8080:8080"
+    environment:
+      - POSTGRES_DSN=postgres://postgres:postgres@db:5432/postgres?sslmode=disable
+      - AISSTREAM_API_KEY=${AISSTREAM_API_KEY}
     depends_on:
       - db
+      - db-migrate
+    ports:
+      - "8080:8080"
 
   frontend:
     build:
-      context: ../frontend
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: frontend/Dockerfile
     ports:
       - "3000:80"
 
@@ -76,6 +123,12 @@ services:
       dockerfile: Dockerfile
     depends_on:
       - db
+      - db-migrate
+
+  # aisstreamer is deprecated — AIS streaming is now handled dynamically
+  # by the API when a port is selected on the frontend.
+  # aisstreamer:
+  #   build: ...
 
   grafana:
     image: grafana/grafana:9.5.2
@@ -85,6 +138,10 @@ services:
       - "3001:3000"
     volumes:
       - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
     depends_on:
       - prometheus
+
+volumes:
+  pgdata:
 

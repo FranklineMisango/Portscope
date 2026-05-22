@@ -6,8 +6,9 @@ COPY . .
 RUN go mod download
 RUN go build -o /bin/consumer ./consumer
 
-FROM alpine:3.18
+FROM alpine:3.20
 RUN apk add --no-cache ca-certificates
 COPY --from=builder /bin/consumer /bin/consumer
 EXPOSE 9090
 ENTRYPOINT ["/bin/consumer"]
+

@@ -1,101 +1,279 @@
-const e = React.createElement;
+(function(){
+	const e = React.createElement;
+	const API_BASE = window.PORTSCOPE_API_BASE || 'http://127.0.0.1:8080';
 
-function App(){
-	const [portId, setPortId] = React.useState(1);
-	const [radius, setRadius] = React.useState(5000);
-	const mapRef = React.useRef(null);
-	const markersRef = React.useRef([]);
-	const markerLayerRef = React.useRef(null);
+	function apiUrl(path) {
+		return `${API_BASE}${path}`;
+	}
+
+function wsUrl(path) {
+	const url = new URL(path, API_BASE);
+	url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+	return url.toString();
+}
+
+function pointFromGeometry(geom) {
+	if (!geom) return null;
+	const parsed = typeof geom === 'string' ? JSON.parse(geom) : geom;
+	if (parsed && parsed.type === 'Point' && Array.isArray(parsed.coordinates) && parsed.coordinates.length >= 2) {
+		return parsed.coordinates;
+	}
+	return null;
+}
+
+function formatDate(value) {
+	if (!value) return 'Unknown';
+	return new Date(value).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+function formatCount(value) {
+	if (value === null || value === undefined || value === '') return 'n/a';
+	const number = Number(value);
+	return Number.isFinite(number) ? number.toLocaleString() : String(value);
+}
+
+function formatPercent(value) {
+	if (value === null || value === undefined || value === '') return 'n/a';
+	const number = Number(value);
+	return Number.isFinite(number) ? `${number.toFixed(1)}%` : String(value);
+}
+
+function normalizeFeatureCollection(collection, kind) {
+	if (!collection || !Array.isArray(collection.features)) return [];
+	return collection.features.map((feature, index) => {
+		const properties = feature.properties || {};
+		return {
+			id: properties.ObjectId || properties.portid || index + 1,
+			pageid: properties.pageid || '',
+			name: properties.fullname || properties.portname || properties.portid || `Unnamed ${kind}`,
+			country: properties.country || '',
+			iso3: properties.ISO3 || '',
+			observed_on: properties.date || properties.observed_on || null,
+			source_value: properties,
+			geom: feature.geometry,
+			kind,
+		};
+	});
+}
+
+function App() {
 	const [ports, setPorts] = React.useState([]);
-	const [history, setHistory] = React.useState([]);
-	const chartRef = React.useRef(null);
+	const [chokepoints, setChokepoints] = React.useState([]);
+	const [selectedItem, setSelectedItem] = React.useState(null);
+	const [status, setStatus] = React.useState('Loading PortWatch datasets...');
 
-	React.useEffect(()=>{
-		// init map
-		mapRef.current = L.map('map').setView([0,0], 2);
-		L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
-			maxZoom: 19,
-		}).addTo(mapRef.current);
-		markerLayerRef.current = L.markerClusterGroup();
-		mapRef.current.addLayer(markerLayerRef.current);
+	const mapRef = React.useRef(null);
+	const portLayerRef = React.useRef(null);
+	const chokepointLayerRef = React.useRef(null);
 
-		// load ports
-		fetch('/ports').then(r=>r.json()).then(data=>{ setPorts(data); }).catch(()=>{});
-	},[])
+	function selectItem(type, data) {
+		setSelectedItem({ type, data });
+		setStatus(`${data.name} selected.`);
+	}
 
-	async function fetchLive(){
-		try{
-			const url = `/port/${portId}/live?radius=${radius}&limit=500`;
-			const resp = await fetch(url);
-			const data = await resp.json();
-			// clear markers
-			markersRef.current.forEach(m=>mapRef.current.removeLayer(m));
-			markersRef.current = [];
-			if(data.length===0) return;
-			data.forEach(item=>{
-				if(item.position){
-					const g = typeof item.position === 'string' ? JSON.parse(item.position) : item.position;
-					if(g && g.type==='Point' && g.coordinates){
-						const [lon,lat] = g.coordinates;
-						const marker = L.marker([lat,lon]);
-						marker.bindPopup(`<b>MMSI:</b> ${item.mmsi || 'n/a'}<br/><b>Time:</b> ${item.time}`);
-						markerLayerRef.current.addLayer(marker);
-						markersRef.current.push(marker);
-					}
-				}
+	function renderLayers() {
+		if (!portLayerRef.current || !chokepointLayerRef.current) return;
+		portLayerRef.current.clearLayers();
+		chokepointLayerRef.current.clearLayers();
+
+		const hasSelection = Boolean(selectedItem);
+
+		ports.forEach(item => {
+			const coords = pointFromGeometry(item.geom);
+			if (!coords) return;
+			const [lon, lat] = coords;
+			const active = hasSelection && selectedItem.type === 'port' && selectedItem.data.id === item.id;
+			const marker = L.circleMarker([lat, lon], {
+				radius: active ? 10 : 7,
+				color: active ? '#63d6ff' : '#8a7dff',
+				weight: 2,
+				fillColor: active ? '#63d6ff' : '#c9c1ff',
+				fillOpacity: 0.92,
 			});
-			// adjust view to markers
-			const group = L.featureGroup(markersRef.current);
-			if(markersRef.current.length>0){
-				mapRef.current.fitBounds(group.getBounds(),{maxZoom:12});
+			marker.bindTooltip(`<b>${item.name}</b><br/>Port intelligence`, { direction: 'top', offset: [0, -8] });
+			marker.on('click', () => selectItem('port', item));
+			marker.addTo(portLayerRef.current);
+		});
+
+		chokepoints.forEach(item => {
+			const coords = pointFromGeometry(item.geom);
+			if (!coords) return;
+			const [lon, lat] = coords;
+			const active = hasSelection && selectedItem.type === 'chokepoint' && selectedItem.data.id === item.id;
+			const marker = L.circleMarker([lat, lon], {
+				radius: active ? 9 : 6,
+				color: active ? '#ffcc66' : '#ff8a5b',
+				weight: 2,
+				fillColor: active ? '#ffcc66' : '#ffb38f',
+				fillOpacity: 0.95,
+			});
+			marker.bindTooltip(`<b>${item.name}</b><br/>Chokepoint intensity`, { direction: 'top', offset: [0, -8] });
+			marker.on('click', () => selectItem('chokepoint', item));
+			marker.addTo(chokepointLayerRef.current);
+		});
+	}
+
+	async function loadData() {
+		setStatus('Loading local PortWatch datasets...');
+		try {
+			const [portsResponse, chokepointsResponse] = await Promise.all([
+				fetch('/data/Ports.geojson'),
+				fetch('/data/Chokepoints.geojson'),
+			]);
+			const [portsData, chokepointsData] = await Promise.all([
+				portsResponse.json(),
+				chokepointsResponse.json(),
+			]);
+
+			const normalizedPorts = normalizeFeatureCollection(portsData, 'port');
+			const normalizedChokepoints = normalizeFeatureCollection(chokepointsData, 'chokepoint');
+
+			setPorts(normalizedPorts);
+			setChokepoints(normalizedChokepoints);
+
+			if (normalizedPorts.length > 0 || normalizedChokepoints.length > 0) {
+				setStatus(`Loaded ${normalizedPorts.length} ports and ${normalizedChokepoints.length} chokepoints.`);
+			} else {
+				setStatus('No local PortWatch records returned yet.');
 			}
-		}catch(err){
+		} catch (err) {
 			console.error(err);
+			setStatus('Unable to load local PortWatch data.');
 		}
 	}
 
-	React.useEffect(()=>{
-		fetchLive();
-		const id = setInterval(fetchLive, 10000);
-		return ()=>clearInterval(id);
-	},[portId,radius]);
+	React.useEffect(() => {
+		if (typeof L === 'undefined') {
+			setStatus('Leaflet library not loaded; map unavailable.');
+			return;
+		}
+		setTimeout(() => {
+			const mapEl = document.getElementById('map');
+			if (!mapEl || mapEl._leaflet_id) return;
 
-	// fetch history for selected port
-	React.useEffect(()=>{
-		fetch(`/port/${portId}/traffic?range=30d`).then(r=>r.json()).then(data=>{
-			setHistory(data);
-			// update chart
-			const labels = data.map(d=>new Date(d.day).toLocaleDateString());
-			const counts = data.map(d=>d.count);
-			if(chartRef.current){
-				chartRef.current.data.labels = labels;
-				chartRef.current.data.datasets[0].data = counts;
-				chartRef.current.update();
-			} else {
-				const ctx = document.getElementById('historyChart').getContext('2d');
-				chartRef.current = new Chart(ctx, {
-					type: 'line',
-					data: { labels, datasets: [{ label: 'Daily traffic', data: counts, borderColor: 'rgba(75,192,192,1)', tension:0.2 }] },
-					options: { responsive:true }
-				});
+			mapRef.current = L.map('map', { zoomControl: true }).setView([15, 10], 2);
+
+			L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+				maxZoom: 19,
+				attribution: '&copy; OpenStreetMap contributors &copy; CARTO',
+			}).addTo(mapRef.current);
+
+			portLayerRef.current = L.layerGroup().addTo(mapRef.current);
+			chokepointLayerRef.current = L.layerGroup().addTo(mapRef.current);
+
+			setTimeout(() => {
+				if (mapRef.current) {
+					mapRef.current.invalidateSize();
+				}
+			}, 300);
+
+			function handleResize() {
+				if (mapRef.current) {
+					mapRef.current.invalidateSize();
+				}
 			}
-		}).catch(()=>{});
-	},[portId]);
+			window.addEventListener('resize', handleResize);
 
-	return e('div',null,
-		e('div',{id:'controls'},
-			e('label',null,'Port: '),
-			e('select',{value:portId,onChange:e=>setPortId(Number(e.target.value))},
-				ports.map(p=>e('option',{key:p.id,value:p.id},p.name))
-			),
-			' ',
-			e('label',null,'Radius(m): '),
-			e('input',{type:'number',value:radius,onChange:e=>setRadius(Number(e.target.value))}),
-			e('button',{onClick:fetchLive},'Refresh')
+			if (mapEl.parentElement && typeof ResizeObserver !== 'undefined') {
+				const observer = new ResizeObserver(() => {
+					if (mapRef.current) mapRef.current.invalidateSize();
+				});
+				observer.observe(mapEl.parentElement);
+				mapEl._resizeObserver = observer;
+			}
+
+			loadData();
+		}, 50);
+
+		return () => {
+			window.removeEventListener('resize', () => {});
+			if (mapRef.current) {
+				mapRef.current.remove();
+				mapRef.current = null;
+			}
+		};
+	}, []);
+
+	React.useEffect(() => {
+		if (!mapRef.current) return;
+		renderLayers();
+	}, [ports, chokepoints, selectedItem]);
+
+	const selectedData = selectedItem ? selectedItem.data : null;
+	const selectedDate = selectedData ? selectedData.observed_on : null;
+
+	const metrics = (() => {
+		if (!selectedData) return [];
+		const sv = selectedData.source_value || selectedData.metrics || {};
+		const totalVessels = Number(sv.vessel_count_total);
+		const items = [];
+		if (sv.vessel_count_total !== undefined) items.push({ key: 'Total Vessels', value: formatCount(sv.vessel_count_total) });
+		if (sv.vessel_count_container !== undefined) items.push({ key: 'Container Vessels', value: formatCount(sv.vessel_count_container) });
+		if (sv.vessel_count_dry_bulk !== undefined) items.push({ key: 'Dry Bulk Vessels', value: formatCount(sv.vessel_count_dry_bulk) });
+		if (sv.vessel_count_general_cargo !== undefined) items.push({ key: 'General Cargo Vessels', value: formatCount(sv.vessel_count_general_cargo) });
+		if (sv.vessel_count_RoRo !== undefined) items.push({ key: 'RoRo Vessels', value: formatCount(sv.vessel_count_RoRo) });
+		if (sv.vessel_count_tanker !== undefined) items.push({ key: 'Tanker Vessels', value: formatCount(sv.vessel_count_tanker) });
+		if (Number.isFinite(totalVessels) && totalVessels > 0) {
+			if (sv.vessel_count_container !== undefined) items.push({ key: 'Container Share', value: formatPercent((Number(sv.vessel_count_container) / totalVessels) * 100) });
+			if (sv.vessel_count_dry_bulk !== undefined) items.push({ key: 'Dry Bulk Share', value: formatPercent((Number(sv.vessel_count_dry_bulk) / totalVessels) * 100) });
+			if (sv.vessel_count_general_cargo !== undefined) items.push({ key: 'General Cargo Share', value: formatPercent((Number(sv.vessel_count_general_cargo) / totalVessels) * 100) });
+			if (sv.vessel_count_RoRo !== undefined) items.push({ key: 'RoRo Share', value: formatPercent((Number(sv.vessel_count_RoRo) / totalVessels) * 100) });
+			if (sv.vessel_count_tanker !== undefined) items.push({ key: 'Tanker Share', value: formatPercent((Number(sv.vessel_count_tanker) / totalVessels) * 100) });
+		}
+		if (sv.industry_top1) items.push({ key: 'Top Industry', value: sv.industry_top1 });
+		if (sv.industry_top2) items.push({ key: 'Top Industry 2', value: sv.industry_top2 });
+		if (sv.industry_top3) items.push({ key: 'Top Industry 3', value: sv.industry_top3 });
+		if (sv.n_total !== undefined) items.push({ key: 'Total Transits', value: formatCount(sv.n_total) });
+		if (sv.n_tanker !== undefined) items.push({ key: 'Tanker Transits', value: formatCount(sv.n_tanker) });
+		if (sv.n_container !== undefined) items.push({ key: 'Container Transits', value: formatCount(sv.n_container) });
+		if (sv.n_bulk !== undefined) items.push({ key: 'Bulk Carrier Transits', value: formatCount(sv.n_bulk) });
+		return items;
+	})();
+
+	return e('div', { className: 'shell' },
+		e('div', { className: 'topbar' },
+			e('div', { className: 'topbar-meta' },
+				e('div', { className: 'status-pill' },
+					e('span', { className: 'status-dot' }),
+					e('span', null, status)
+				)
+			)
 		),
-		e('div',{id:'map'}),
-		e('div',{style:{padding:'8px'}}, e('canvas',{id:'historyChart',width:400,height:100}))
-	)
+		e('div', { className: 'workspace' },
+			e('div', { className: 'sidebar left-rail' },
+				e('div', { className: 'panel section-surface' },
+					e('div', { className: 'panel-body horizontal', style: { display: 'flex', alignItems: 'center', gap: '12px' } },
+						e('div', { style: { flex: '1 1 auto' } },
+							e('div', { className: 'panel-title' }, 'Selected record'),
+							e('div', { className: 'summary-name' }, selectedData ? selectedData.name : 'Choose a record')
+						),
+						e('span', { className: 'chip' }, selectedDate ? formatDate(selectedDate) : 'Waiting for selection')
+					)
+				),
+				e('section', { className: 'panel section-surface' },
+					e('div', { className: 'panel-header' },
+						e('div', { className: 'panel-title' }, '1. Port Metrics')
+					),
+					e('div', { className: 'panel-body' },
+						metrics.length > 0
+							? e('div', { className: 'metric-list' }, metrics.map(item => e('div', { key: item.key, className: 'metric-item' }, e('span', null, item.key), e('small', null, String(item.value)))))
+							: e('div', { className: 'empty-state' }, 'No record selected.')
+					)
+				)
+			),
+			e('div', { className: 'map-shell' },
+				e('div', { className: 'map-header' },
+					e('div', { className: 'map-card' },
+						e('span', { className: 'eyebrow' }, 'Map view'),
+						e('h3', null, 'Global port activity'),
+						e('p', null, 'Click a point to load details.')
+					)
+				),
+				e('div', { id: 'map' })
+			)
+		)
+	);
 }
 
-ReactDOM.createRoot(document.getElementById('app')).render(e(App));
+	ReactDOM.createRoot(document.getElementById('app')).render(e(App));
+})();

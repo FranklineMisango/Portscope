@@ -6,7 +6,7 @@ COPY . .
 RUN go build -o /bin/ingest ./
 
 # Runtime
-FROM alpine:3.18
+FROM alpine:3.20
 RUN apk add --no-cache ca-certificates
 COPY --from=builder /bin/ingest /bin/ingest
 EXPOSE 8080
