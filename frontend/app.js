@@ -2,9 +2,9 @@
 	const e = React.createElement;
 	const API_BASE = window.PORTSCOPE_API_BASE || 'http://127.0.0.1:8080';
 
-	function apiUrl(path) {
-		return `${API_BASE}${path}`;
-	}
+function apiUrl(path) {
+	return `${API_BASE}${path}`;
+}
 
 function wsUrl(path) {
 	const url = new URL(path, API_BASE);
@@ -56,6 +56,61 @@ function normalizeFeatureCollection(collection, kind) {
 	});
 }
 
+// Sparkline draws itself using a ref callback so canvas renders correctly
+function Sparkline({ values, color, height }) {
+	const drawTimeout = React.useRef(null);
+	const drawChart = React.useCallback((canvas) => {
+		if (!canvas || !values || values.length < 2) return;
+		// Clear any pending draw
+		if (drawTimeout.current) clearTimeout(drawTimeout.current);
+		drawTimeout.current = setTimeout(() => {
+			const ctx = canvas.getContext('2d');
+			const w = canvas.width = canvas.clientWidth * 2;
+			const h = canvas.height = (height || 100) * 2;
+			ctx.clearRect(0, 0, w, h);
+
+			const valid = values.filter(v => v > 0);
+			const max = Math.max(...valid, 1);
+			const min = 0;
+			const range = max - min || 1;
+			const pad = 6;
+			const dw = w - pad * 2;
+			const dh = h - pad * 2;
+			const len = values.length;
+			if (len < 2) return;
+
+			const pts = values.map((v, i) => ({
+				x: pad + (i / (len - 1)) * dw,
+				y: pad + dh - ((v - min) / range) * dh
+			}));
+
+			// Fill
+			ctx.beginPath();
+			const grad = ctx.createLinearGradient(0, pad, 0, pad + dh);
+			grad.addColorStop(0, (color || '#63d6ff') + '25');
+			grad.addColorStop(1, (color || '#63d6ff') + '02');
+			ctx.fillStyle = grad;
+			ctx.moveTo(pts[0].x, pts[0].y);
+			for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+			ctx.lineTo(pts[pts.length - 1].x, pad + dh);
+			ctx.lineTo(pts[0].x, pad + dh);
+			ctx.closePath();
+			ctx.fill();
+
+			// Line
+			ctx.beginPath();
+			ctx.strokeStyle = color || '#63d6ff';
+			ctx.lineWidth = 2;
+			ctx.lineJoin = 'round';
+			ctx.lineCap = 'round';
+			ctx.moveTo(pts[0].x, pts[0].y);
+			for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+			ctx.stroke();
+		}, 30);
+	}, [values, color, height]);
+	return e('canvas', { ref: drawChart, style: { width: '100%', height: (height || 100) + 'px' } });
+}
+
 function App() {
 	const [ports, setPorts] = React.useState([]);
 	const [chokepoints, setChokepoints] = React.useState([]);
@@ -75,7 +130,7 @@ function App() {
 		setStatus(`${data.name} selected.`);
 	}
 
-	// Fetch PortWatch time-series data when a item is selected
+	// Fetch PortWatch data
 	React.useEffect(() => {
 		const pageid = selectedItem?.data?.pageid;
 		if (!pageid) {
@@ -107,29 +162,6 @@ function App() {
 				setPwLoading(false);
 			});
 	}, [selectedItem]);
-
-	// Draw sparklines after pwData updates
-	React.useEffect(() => {
-		if (!pwData || pwLoading) return;
-		const ts = pwData.timeseries;
-		if (!ts) return;
-
-		// Delay to ensure canvas elements are rendered
-		setTimeout(() => {
-			if (ts.portcalls && ts.portcalls.length > 0) {
-				const vals = ts.portcalls.slice(-60).map(p => p.value);
-				drawSparkline('pw-chart-portcalls', vals, '#63d6ff');
-			}
-			if (ts.imports && ts.imports.length > 0) {
-				const vals = ts.imports.slice(-60).map(p => p.value);
-				drawSparkline('pw-chart-imports', vals, '#76e4b5');
-			}
-			if (ts.exports && ts.exports.length > 0) {
-				const vals = ts.exports.slice(-60).map(p => p.value);
-				drawSparkline('pw-chart-exports', vals, '#ffcc66');
-			}
-		}, 100);
-	}, [pwData, pwLoading]);
 
 	function renderLayers() {
 		if (!portLayerRef.current || !chokepointLayerRef.current) return;
@@ -210,53 +242,34 @@ function App() {
 		setTimeout(() => {
 			const mapEl = document.getElementById('map');
 			if (!mapEl || mapEl._leaflet_id) return;
-
-
 			mapRef.current = L.map('map', { zoomControl: true, worldCopyJump: true }).setView([20, 20], 2);
-
 			L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
 				maxZoom: 19,
 				attribution: '&copy; OpenStreetMap contributors &copy; CARTO',
 			}).addTo(mapRef.current);
-
 			portLayerRef.current = L.layerGroup().addTo(mapRef.current);
 			chokepointLayerRef.current = L.layerGroup().addTo(mapRef.current);
-
 			loadData();
 		}, 50);
-
 		return () => {
-			if (mapRef.current) {
-				mapRef.current.remove();
-				mapRef.current = null;
-			}
+			if (mapRef.current) { mapRef.current.remove(); mapRef.current = null; }
 		};
 	}, []);
 
-	// Invalidate size and fit all points once data loads
 	const dataLoadedRef = React.useRef(false);
 	React.useEffect(() => {
 		if (!mapRef.current) return;
 		if ((ports.length === 0 && chokepoints.length === 0)) return;
-
 		renderLayers();
-
-		// One-time fit to show all points
 		if (!dataLoadedRef.current) {
 			dataLoadedRef.current = true;
 			setTimeout(() => {
 				if (!mapRef.current) return;
 				mapRef.current.invalidateSize();
 				const allCoords = [];
-				ports.forEach(p => {
-					const c = pointFromGeometry(p.geom);
-					if (c) allCoords.push([c[1], c[0]]);
-				});
-				chokepoints.forEach(p => {
-					const c = pointFromGeometry(p.geom);
-					if (c) allCoords.push([c[1], c[0]]);
-				});
-					mapRef.current.fitBounds(allCoords, { padding: [30, 30], maxZoom: 4 });
+				ports.forEach(p => { const c = pointFromGeometry(p.geom); if (c) allCoords.push([c[1], c[0]]); });
+				chokepoints.forEach(p => { const c = pointFromGeometry(p.geom); if (c) allCoords.push([c[1], c[0]]); });
+				mapRef.current.fitBounds(allCoords, { padding: [30, 30], maxZoom: 4 });
 			}, 200);
 		}
 	}, [ports, chokepoints]);
@@ -291,6 +304,13 @@ function App() {
 		if (sv.n_bulk !== undefined) items.push({ key: 'Bulk Carrier Transits', value: formatCount(sv.n_bulk) });
 		return items;
 	})();
+
+	// Helper to get sparkline values
+	function sparkVals(key) {
+		if (!pwData || !pwData.timeseries || !pwData.timeseries[key]) return null;
+		const pts = pwData.timeseries[key];
+		return pts.slice(-30).map(p => p.value);
+	}
 
 	return e('div', { className: 'shell' },
 		e('div', { className: 'topbar' },
@@ -333,16 +353,14 @@ function App() {
 				),
 				e('div', { id: 'map' })
 			),
-			// Right sidebar — PortWatch analytics
-			e('div', { className: 'sidebar right-rail', style: { padding: '10px', gap: '8px' } },
-				// Header with external link
+			// Right sidebar — PortWatch analytics (wider)
+			e('div', { className: 'sidebar right-rail', style: { padding: '12px', gap: '10px' } },
 				e('div', { className: 'pw-header' },
 					e('span', { className: 'title' }, selectedItem ? selectedItem.data.name : 'PortWatch'),
 					selectedItem?.data?.pageid
 						? e('a', { className: 'ext-link', href: apiUrl('/portwatch/' + selectedItem.data.pageid), target: '_blank' }, 'Open on PortWatch →')
 						: null
 				),
-				// Stat cards or loading/empty
 				...(!selectedItem
 					? [e('div', { className: 'pw-empty', key: 'empty' }, 'Click a port or chokepoint on the map to view PortWatch analytics.')]
 					: pwLoading
@@ -351,7 +369,6 @@ function App() {
 					? [e('div', { className: 'pw-error', key: 'error' }, 'Could not load PortWatch data. Visit the external link above.')]
 					: pwData && pwData.metrics
 					? [
-						// Stat grid
 						e('div', { className: 'pw-stat-grid', key: 'stats' },
 							e('div', { className: 'pw-stat' },
 								e('div', { className: 'val' }, formatCount(pwData.metrics.total_portcalls)),
@@ -370,36 +387,33 @@ function App() {
 								e('div', { className: 'lbl' }, 'Exports (tons)')
 							)
 						),
-						// Date range
 						e('div', { style: { fontSize: '10px', color: 'var(--muted)', textAlign: 'center', padding: '2px 0' }, key: 'range' },
 							'Data: ' + (pwData.metrics.data_range_start || '?') + ' → ' + (pwData.metrics.data_range_end || '?')
 						),
-						// Portcalls sparkline
-						e('div', { className: 'pw-chart-box', key: 'chart1' },
-							e('div', { className: 'pw-chart-label' }, 'Daily Port Calls (last 60)'),
-							e('canvas', { id: 'pw-chart-portcalls', style: { width: '100%', height: '100px' } })
+						// Sparkline charts using React component
+						e('div', { className: 'pw-chart-box', key: 'c1' },
+
+							e('div', { className: 'pw-chart-label' }, 'Daily Port Calls (last 30)'),
+							e(Sparkline, { values: sparkVals('portcalls'), color: '#63d6ff', height: 100 })
 						),
-						// Imports sparkline
-						pwData.timeseries?.imports?.length > 0
-							? e('div', { className: 'pw-chart-box', key: 'chart2' },
-								e('div', { className: 'pw-chart-label' }, 'Daily Imports (tons, last 60)'),
-								e('canvas', { id: 'pw-chart-imports', style: { width: '100%', height: '80px' } })
+						sparkVals('imports') && sparkVals('imports').some(v => v > 0)
+							? e('div', { className: 'pw-chart-box', key: 'c2' },
+								e('div', { className: 'pw-chart-label' }, 'Daily Imports (tons, last 30)'),
+								e(Sparkline, { values: sparkVals('imports'), color: '#76e4b5', height: 80 })
 							)
 							: null,
-						// Exports sparkline
-						pwData.timeseries?.exports?.length > 0
-							? e('div', { className: 'pw-chart-box', key: 'chart3' },
-								e('div', { className: 'pw-chart-label' }, 'Daily Exports (tons, last 60)'),
-								e('canvas', { id: 'pw-chart-exports', style: { width: '100%', height: '80px' } })
+						sparkVals('exports') && sparkVals('exports').some(v => v > 0)
+							? e('div', { className: 'pw-chart-box', key: 'c3' },
+								e('div', { className: 'pw-chart-label' }, 'Daily Exports (tons, last 30)'),
+								e(Sparkline, { values: sparkVals('exports'), color: '#ffcc66', height: 80 })
 							)
 							: null,
-						// External data links (unavailable via API)
 						pwData.unavailable_data && pwData.unavailable_data.length > 0
-							? e('div', { key: 'ext-links', style: { display: 'flex', flexDirection: 'column', gap: '4px', borderTop: '1px solid var(--border)', paddingTop: '8px', marginTop: '4px' } },
+							? e('div', { key: 'ext-links', style: { display: 'flex', flexDirection: 'column', gap: '4px', borderTop: '1px solid var(--border)', paddingTop: '10px', marginTop: '6px' } },
 								e('div', { style: { fontSize: '10px', textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--muted)', marginBottom: '4px' } }, 'Additional data on PortWatch'),
 								pwData.unavailable_data.map((item, i) =>
 									e('a', { key: i, className: 'pw-ext-link', href: item.external_url || pwData.external_url, target: '_blank' },
-										e('span', { className: 'icn' }, '🔗'),
+										e('span', { className: 'icn', style: { color: 'var(--accent)', fontSize: '12px' } }, '↗'),
 										e('div', null,
 											e('div', null, item.label),
 											e('div', { className: 'desc' }, item.description ? item.description.slice(0, 80) + '...' : '')
