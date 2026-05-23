@@ -61,15 +61,75 @@ function App() {
 	const [chokepoints, setChokepoints] = React.useState([]);
 	const [selectedItem, setSelectedItem] = React.useState(null);
 	const [status, setStatus] = React.useState('Loading PortWatch datasets...');
+	const [pwData, setPwData] = React.useState(null);
+	const [pwLoading, setPwLoading] = React.useState(false);
+	const [pwError, setPwError] = React.useState(null);
 
 	const mapRef = React.useRef(null);
 	const portLayerRef = React.useRef(null);
 	const chokepointLayerRef = React.useRef(null);
+	const pwPrevPageid = React.useRef(null);
 
 	function selectItem(type, data) {
 		setSelectedItem({ type, data });
 		setStatus(`${data.name} selected.`);
 	}
+
+	// Fetch PortWatch time-series data when a item is selected
+	React.useEffect(() => {
+		const pageid = selectedItem?.data?.pageid;
+		if (!pageid) {
+			setPwData(null);
+			setPwLoading(false);
+			setPwError(null);
+			pwPrevPageid.current = null;
+			return;
+		}
+		if (pageid === pwPrevPageid.current) return;
+		pwPrevPageid.current = pageid;
+
+		setPwLoading(true);
+		setPwError(null);
+		setPwData(null);
+
+		fetch(apiUrl('/api/portwatch/' + pageid + '/data'))
+			.then(res => {
+				if (!res.ok) throw new Error('API returned ' + res.status);
+				return res.json();
+			})
+			.then(data => {
+				setPwData(data);
+				setPwLoading(false);
+			})
+			.catch(err => {
+				console.error('PortWatch data error:', err);
+				setPwError(err.message);
+				setPwLoading(false);
+			});
+	}, [selectedItem]);
+
+	// Draw sparklines after pwData updates
+	React.useEffect(() => {
+		if (!pwData || pwLoading) return;
+		const ts = pwData.timeseries;
+		if (!ts) return;
+
+		// Delay to ensure canvas elements are rendered
+		setTimeout(() => {
+			if (ts.portcalls && ts.portcalls.length > 0) {
+				const vals = ts.portcalls.slice(-60).map(p => p.value);
+				drawSparkline('pw-chart-portcalls', vals, '#63d6ff');
+			}
+			if (ts.imports && ts.imports.length > 0) {
+				const vals = ts.imports.slice(-60).map(p => p.value);
+				drawSparkline('pw-chart-imports', vals, '#76e4b5');
+			}
+			if (ts.exports && ts.exports.length > 0) {
+				const vals = ts.exports.slice(-60).map(p => p.value);
+				drawSparkline('pw-chart-exports', vals, '#ffcc66');
+			}
+		}, 100);
+	}, [pwData, pwLoading]);
 
 	function renderLayers() {
 		if (!portLayerRef.current || !chokepointLayerRef.current) return;
@@ -151,7 +211,8 @@ function App() {
 			const mapEl = document.getElementById('map');
 			if (!mapEl || mapEl._leaflet_id) return;
 
-			mapRef.current = L.map('map', { zoomControl: true }).setView([15, 10], 2);
+
+			mapRef.current = L.map('map', { zoomControl: true, worldCopyJump: true }).setView([20, 20], 2);
 
 			L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
 				maxZoom: 19,
@@ -161,32 +222,10 @@ function App() {
 			portLayerRef.current = L.layerGroup().addTo(mapRef.current);
 			chokepointLayerRef.current = L.layerGroup().addTo(mapRef.current);
 
-			setTimeout(() => {
-				if (mapRef.current) {
-					mapRef.current.invalidateSize();
-				}
-			}, 300);
-
-			function handleResize() {
-				if (mapRef.current) {
-					mapRef.current.invalidateSize();
-				}
-			}
-			window.addEventListener('resize', handleResize);
-
-			if (mapEl.parentElement && typeof ResizeObserver !== 'undefined') {
-				const observer = new ResizeObserver(() => {
-					if (mapRef.current) mapRef.current.invalidateSize();
-				});
-				observer.observe(mapEl.parentElement);
-				mapEl._resizeObserver = observer;
-			}
-
 			loadData();
 		}, 50);
 
 		return () => {
-			window.removeEventListener('resize', () => {});
 			if (mapRef.current) {
 				mapRef.current.remove();
 				mapRef.current = null;
@@ -194,10 +233,33 @@ function App() {
 		};
 	}, []);
 
+	// Invalidate size and fit all points once data loads
+	const dataLoadedRef = React.useRef(false);
 	React.useEffect(() => {
 		if (!mapRef.current) return;
+		if ((ports.length === 0 && chokepoints.length === 0)) return;
+
 		renderLayers();
-	}, [ports, chokepoints, selectedItem]);
+
+		// One-time fit to show all points
+		if (!dataLoadedRef.current) {
+			dataLoadedRef.current = true;
+			setTimeout(() => {
+				if (!mapRef.current) return;
+				mapRef.current.invalidateSize();
+				const allCoords = [];
+				ports.forEach(p => {
+					const c = pointFromGeometry(p.geom);
+					if (c) allCoords.push([c[1], c[0]]);
+				});
+				chokepoints.forEach(p => {
+					const c = pointFromGeometry(p.geom);
+					if (c) allCoords.push([c[1], c[0]]);
+				});
+					mapRef.current.fitBounds(allCoords, { padding: [30, 30], maxZoom: 4 });
+			}, 200);
+		}
+	}, [ports, chokepoints]);
 
 	const selectedData = selectedItem ? selectedItem.data : null;
 	const selectedDate = selectedData ? selectedData.observed_on : null;
@@ -270,6 +332,85 @@ function App() {
 					)
 				),
 				e('div', { id: 'map' })
+			),
+			// Right sidebar — PortWatch analytics
+			e('div', { className: 'sidebar right-rail', style: { padding: '10px', gap: '8px' } },
+				// Header with external link
+				e('div', { className: 'pw-header' },
+					e('span', { className: 'title' }, selectedItem ? selectedItem.data.name : 'PortWatch'),
+					selectedItem?.data?.pageid
+						? e('a', { className: 'ext-link', href: apiUrl('/portwatch/' + selectedItem.data.pageid), target: '_blank' }, 'Open on PortWatch →')
+						: null
+				),
+				// Stat cards or loading/empty
+				...(!selectedItem
+					? [e('div', { className: 'pw-empty', key: 'empty' }, 'Click a port or chokepoint on the map to view PortWatch analytics.')]
+					: pwLoading
+					? [e('div', { className: 'pw-loading', key: 'loading' }, 'Loading PortWatch data...')]
+					: pwError
+					? [e('div', { className: 'pw-error', key: 'error' }, 'Could not load PortWatch data. Visit the external link above.')]
+					: pwData && pwData.metrics
+					? [
+						// Stat grid
+						e('div', { className: 'pw-stat-grid', key: 'stats' },
+							e('div', { className: 'pw-stat' },
+								e('div', { className: 'val' }, formatCount(pwData.metrics.total_portcalls)),
+								e('div', { className: 'lbl' }, 'Port Calls')
+							),
+							e('div', { className: 'pw-stat' },
+								e('div', { className: 'val' }, formatCount(Math.round(pwData.metrics.avg_daily_portcalls))),
+								e('div', { className: 'lbl' }, 'Avg Daily')
+							),
+							e('div', { className: 'pw-stat' },
+								e('div', { className: 'val' }, formatCount(Math.round(pwData.metrics.total_imports / 1e6)) + 'M'),
+								e('div', { className: 'lbl' }, 'Imports (tons)')
+							),
+							e('div', { className: 'pw-stat' },
+								e('div', { className: 'val' }, formatCount(Math.round(pwData.metrics.total_exports / 1e6)) + 'M'),
+								e('div', { className: 'lbl' }, 'Exports (tons)')
+							)
+						),
+						// Date range
+						e('div', { style: { fontSize: '10px', color: 'var(--muted)', textAlign: 'center', padding: '2px 0' }, key: 'range' },
+							'Data: ' + (pwData.metrics.data_range_start || '?') + ' → ' + (pwData.metrics.data_range_end || '?')
+						),
+						// Portcalls sparkline
+						e('div', { className: 'pw-chart-box', key: 'chart1' },
+							e('div', { className: 'pw-chart-label' }, 'Daily Port Calls (last 60)'),
+							e('canvas', { id: 'pw-chart-portcalls', style: { width: '100%', height: '100px' } })
+						),
+						// Imports sparkline
+						pwData.timeseries?.imports?.length > 0
+							? e('div', { className: 'pw-chart-box', key: 'chart2' },
+								e('div', { className: 'pw-chart-label' }, 'Daily Imports (tons, last 60)'),
+								e('canvas', { id: 'pw-chart-imports', style: { width: '100%', height: '80px' } })
+							)
+							: null,
+						// Exports sparkline
+						pwData.timeseries?.exports?.length > 0
+							? e('div', { className: 'pw-chart-box', key: 'chart3' },
+								e('div', { className: 'pw-chart-label' }, 'Daily Exports (tons, last 60)'),
+								e('canvas', { id: 'pw-chart-exports', style: { width: '100%', height: '80px' } })
+							)
+							: null,
+						// External data links (unavailable via API)
+						pwData.unavailable_data && pwData.unavailable_data.length > 0
+							? e('div', { key: 'ext-links', style: { display: 'flex', flexDirection: 'column', gap: '4px', borderTop: '1px solid var(--border)', paddingTop: '8px', marginTop: '4px' } },
+								e('div', { style: { fontSize: '10px', textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--muted)', marginBottom: '4px' } }, 'Additional data on PortWatch'),
+								pwData.unavailable_data.map((item, i) =>
+									e('a', { key: i, className: 'pw-ext-link', href: item.external_url || pwData.external_url, target: '_blank' },
+										e('span', { className: 'icn' }, '🔗'),
+										e('div', null,
+											e('div', null, item.label),
+											e('div', { className: 'desc' }, item.description ? item.description.slice(0, 80) + '...' : '')
+										)
+									)
+								)
+							)
+							: null
+						]
+					: [e('div', { className: 'pw-empty', key: 'no-data' }, 'No PortWatch data available for this item.')]
+				)
 			)
 		)
 	);

@@ -20,11 +20,11 @@ import (
 )
 
 type LiveEntry struct {
-	ID        int64           `json:"id"`
-	MMSI      *int64          `json:"mmsi,omitempty"`
-	Time      time.Time       `json:"time"`
-	Payload   json.RawMessage `json:"payload"`
-	Position  json.RawMessage `json:"position,omitempty"`
+	ID       int64           `json:"id"`
+	MMSI     *int64          `json:"mmsi,omitempty"`
+	Time     time.Time       `json:"time"`
+	Payload  json.RawMessage `json:"payload"`
+	Position json.RawMessage `json:"position,omitempty"`
 }
 
 type DatasetEntry struct {
@@ -53,11 +53,11 @@ type wsMessage struct {
 
 // ——— AIS streaming globals ———
 var (
-	aisConnMu   sync.Mutex
-	aisConn     *websocket.Conn
-	aisCtx      context.Context
-	aisCancel   context.CancelFunc
-	aisDB       *sql.DB
+	aisConnMu sync.Mutex
+	aisConn   *websocket.Conn
+	aisCtx    context.Context
+	aisCancel context.CancelFunc
+	aisDB     *sql.DB
 )
 
 // portBoundingBox creates a bounding box [SW, NE] around a point with given radius in km
@@ -397,7 +397,7 @@ func main() {
 	aisAPIKey := os.Getenv("AISSTREAM_API_KEY")
 
 	// simple in-memory cache with 30s default TTL and 1m cleanup
-	c := cache.New(30*time.Second, 1*time.Minute)
+	c = cache.New(30*time.Second, 1*time.Minute)
 
 	r := mux.NewRouter()
 
@@ -444,6 +444,7 @@ func main() {
 		w.Write([]byte("ok"))
 	})
 
+	// PortWatch pageid redirect (kept for backwards compat)
 	r.HandleFunc("/portwatch/{pageid}", func(w http.ResponseWriter, r *http.Request) {
 		vars := mux.Vars(r)
 		pageID := vars["pageid"]
@@ -451,12 +452,15 @@ func main() {
 			http.Error(w, "missing pageid", http.StatusBadRequest)
 			return
 		}
-
-		// Redirect directly to the IMF PortWatch page.
-		// pageid values come from the local GeoJSON data, not the database,
-		// so we skip the DB lookup and redirect immediately.
 		http.Redirect(w, r, "https://portwatch.imf.org/pages/"+pageID, http.StatusFound)
 	}).Methods("GET")
+
+	// ─── PortWatch Data API endpoints ───
+	r.HandleFunc("/api/portwatch/metrics", handleAvailableMetrics).Methods("GET")
+	r.HandleFunc("/api/portwatch/{pageid}/data", handlePortWatchData(db)).Methods("GET")
+	r.HandleFunc("/api/portwatch/{pageid}/metrics", handlePortWatchMetrics(db)).Methods("GET")
+	r.HandleFunc("/api/portwatch/search", handlePortWatchSearch(db)).Methods("GET")
+	r.HandleFunc("/api/portwatch/scrape", handleTriggerScrape).Methods("POST")
 
 	r.HandleFunc("/port/{id:[0-9]+}/live", func(w http.ResponseWriter, r *http.Request) {
 		vars := mux.Vars(r)
@@ -614,10 +618,18 @@ func main() {
 					var p DatasetEntry
 					var country, iso3, observedOn, geom sql.NullString
 					if err := rows.Scan(&p.ID, &p.Name, &country, &iso3, &observedOn, &p.SourceValue, &geom); err == nil {
-						if country.Valid { p.Country = country.String }
-						if iso3.Valid { p.ISO3 = iso3.String }
-						if observedOn.Valid { p.ObservedOn = observedOn.String }
-						if geom.Valid { p.Geom = json.RawMessage(geom.String) }
+						if country.Valid {
+							p.Country = country.String
+						}
+						if iso3.Valid {
+							p.ISO3 = iso3.String
+						}
+						if observedOn.Valid {
+							p.ObservedOn = observedOn.String
+						}
+						if geom.Valid {
+							p.Geom = json.RawMessage(geom.String)
+						}
 						ports = append(ports, p)
 					}
 				}
@@ -629,8 +641,12 @@ func main() {
 					var p DatasetEntry
 					var observedOn, geom sql.NullString
 					if err := rows.Scan(&p.ID, &p.Name, &observedOn, &p.SourceValue, &geom); err == nil {
-						if observedOn.Valid { p.ObservedOn = observedOn.String }
-						if geom.Valid { p.Geom = json.RawMessage(geom.String) }
+						if observedOn.Valid {
+							p.ObservedOn = observedOn.String
+						}
+						if geom.Valid {
+							p.Geom = json.RawMessage(geom.String)
+						}
 						chokepoints = append(chokepoints, p)
 					}
 				}
@@ -674,33 +690,33 @@ func main() {
 			}
 
 			if incoming.Kind == "port" {
-			if incoming.Name != "" {
-				if record, err := loadPortRecordByName(db, incoming.Name); err == nil {
-					if payload, err := json.Marshal(wsMessage{Type: "selected_record", Kind: "port", ID: record.ID, Name: record.Name, Data: mustJSON(record)}); err == nil {
+				if incoming.Name != "" {
+					if record, err := loadPortRecordByName(db, incoming.Name); err == nil {
+						if payload, err := json.Marshal(wsMessage{Type: "selected_record", Kind: "port", ID: record.ID, Name: record.Name, Data: mustJSON(record)}); err == nil {
+							_ = conn.WriteMessage(websocket.TextMessage, payload)
+						}
+					}
+				} else if record, err := loadPortRecordByID(db, incoming.ID); err == nil {
+					if payload, err := json.Marshal(wsMessage{Type: "selected_record", Kind: "port", ID: record.ID, Data: mustJSON(record)}); err == nil {
 						_ = conn.WriteMessage(websocket.TextMessage, payload)
 					}
 				}
-			} else if record, err := loadPortRecordByID(db, incoming.ID); err == nil {
-				if payload, err := json.Marshal(wsMessage{Type: "selected_record", Kind: "port", ID: record.ID, Data: mustJSON(record)}); err == nil {
-					_ = conn.WriteMessage(websocket.TextMessage, payload)
-				}
-			}
 
-			// ——— Update AIS subscription for this port ———
-			if aisAPIKey != "" {
-				portName := incoming.Name
-				if portName == "" {
-					portName = "unknown"
-				}
-				lat, lon, err := loadPortCoordsByName(db, portName)
-				if err == nil {
-					log.Printf("[ais] updating subscription to port: %s (%.4f, %.4f)", portName, lat, lon)
-					go updateAISSubscription(aisAPIKey, lat, lon)
-				} else {
-					log.Printf("[ais] could not load coords for port '%s': %v", portName, err)
+				// ——— Update AIS subscription for this port ———
+				if aisAPIKey != "" {
+					portName := incoming.Name
+					if portName == "" {
+						portName = "unknown"
+					}
+					lat, lon, err := loadPortCoordsByName(db, portName)
+					if err == nil {
+						log.Printf("[ais] updating subscription to port: %s (%.4f, %.4f)", portName, lat, lon)
+						go updateAISSubscription(aisAPIKey, lat, lon)
+					} else {
+						log.Printf("[ais] could not load coords for port '%s': %v", portName, err)
+					}
 				}
 			}
-		}
 			if incoming.Kind == "chokepoint" {
 				if incoming.Name != "" {
 					if record, err := loadChokepointRecordByName(db, incoming.Name); err == nil {
@@ -837,8 +853,8 @@ func main() {
 		}
 		defer rows.Close()
 		type DayCount struct {
-			Day time.Time `json:"day"`
-			Count int64 `json:"count"`
+			Day   time.Time `json:"day"`
+			Count int64     `json:"count"`
 		}
 		res := make([]DayCount, 0)
 		for rows.Next() {
@@ -854,7 +870,7 @@ func main() {
 	}).Methods("GET")
 
 	srv := &http.Server{
-		Addr: ":8080",
+		Addr:    ":8080",
 		Handler: r,
 	}
 	log.Println("API listening on :8080")
