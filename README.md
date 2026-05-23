@@ -31,14 +31,14 @@ Key capabilities:
 Below is a simplified architecture view. The repo contains deployable artifacts for each component.
 
 ```
-mermaid
+```mermaid
 flowchart LR
-  F[Frontend: JavaScript (simple SPA)] -->|API calls| API[API Gateway: Go]
-  API --> DB[Postgres + PostGIS]
+  F[Frontend] --> API[API Gateway]
+  API --> DB[Postgres]
   API --> Cache[Redis]
-  Ingest[Ingest Services: Go (AIS, ArcGIS sync)] --> DB
-  ML[ML service: Python] --> API
-  Monitoring[Prometheus & Grafana] -->|scrapes| API
+  Ingest[Ingest Services] --> DB
+  ML[ML Service] --> API
+  Monitoring[Monitoring] --> API
   subgraph Infra
     DB
     Cache
