@@ -1,4 +1,4 @@
- package main
+package main
 
 import (
 	"context"
@@ -158,33 +158,59 @@ func geocodeLocation(ctx context.Context, name, country string) (float64, float6
 }
 
 func fetchArcGISFeatures(ctx context.Context, endpoint string) ([]map[string]interface{}, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		return nil, err
-	}
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("arcgis query %s: %s", endpoint, resp.Status)
-	}
+	const pageSize = 1000
+	const maxRecords = 10000
 
-	var out arcgisResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, err
-	}
+	allFeatures := make([]map[string]interface{}, 0)
+	offset := 0
 
-	features := make([]map[string]interface{}, 0, len(out.Features))
-	for _, feature := range out.Features {
-		if len(feature.Attributes) == 0 {
-			continue
+	for offset < maxRecords {
+		// Build paginated URL
+		pageURL := endpoint
+		if strings.Contains(endpoint, "?") {
+			pageURL += "&resultRecordCount=" + strconv.Itoa(pageSize) + "&resultOffset=" + strconv.Itoa(offset)
+		} else {
+			pageURL += "?resultRecordCount=" + strconv.Itoa(pageSize) + "&resultOffset=" + strconv.Itoa(offset)
 		}
-		features = append(features, feature.Attributes)
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, pageURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		client := &http.Client{Timeout: 30 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			return nil, err
+		}
+
+		var out struct {
+			Features []struct {
+				Attributes map[string]interface{} `json:"attributes"`
+			} `json:"features"`
+			ExceededTransferLimit bool `json:"exceededTransferLimit"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			resp.Body.Close()
+			return nil, err
+		}
+		resp.Body.Close()
+
+		features := make([]map[string]interface{}, 0, len(out.Features))
+		for _, feature := range out.Features {
+			if len(feature.Attributes) == 0 {
+				continue
+			}
+			features = append(features, feature.Attributes)
+		}
+		allFeatures = append(allFeatures, features...)
+
+		if !out.ExceededTransferLimit || len(features) == 0 {
+			break
+		}
+		offset += pageSize
 	}
-	return features, nil
+
+	return allFeatures, nil
 }
 
 func toFloatFromAttrs(attrs map[string]interface{}, key string) (float64, bool) {

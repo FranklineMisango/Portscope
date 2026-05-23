@@ -215,44 +215,127 @@ func (c *PortWatchFSClient) fetchAll(serviceURL, where, outFields, order string)
 
 // ──── PortWatch Data Lookup (uses DB portwatch_scraped_pages or ports table) ────
 
+// pageIDToPortID is loaded from the CSV at startup: pageid -> {portid, fullname, country, iso3, lat, lon}
+var pageIDMap map[string]portWatchPortInfo
+
+type portWatchPortInfo struct {
+	PortID   string  `json:"portid"`
+	FullName string  `json:"fullname"`
+	Country  string  `json:"country"`
+	ISO3     string  `json:"iso3"`
+	Lat      float64 `json:"lat"`
+	Lon      float64 `json:"lon"`
+	PortType string  `json:"port_type"`
+}
+
+func init() {
+	pageIDMap = make(map[string]portWatchPortInfo)
+}
+
+// loadPortWatchMapping reads the CSV/GeoJSON port mapping at startup.
+// Called once from main.go after DB connection is ready.
+func loadPortWatchMapping(db *sql.DB) {
+	rows, err := db.Query(`
+		SELECT source_payload->>'pageid', source_payload->>'portid', 
+		       source_payload->>'fullname', COALESCE(source_payload->>'country', ''),
+		       COALESCE(source_payload->>'iso3', source_payload->>'ISO3', ''),
+		       'port', ST_Y(geom), ST_X(geom)
+		FROM ports WHERE source_payload->>'pageid' IS NOT NULL
+	`)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var info portWatchPortInfo
+			var pageID string
+			if err := rows.Scan(&pageID, &info.PortID, &info.FullName, &info.Country, &info.ISO3, &info.PortType, &info.Lat, &info.Lon); err == nil {
+				pageIDMap[pageID] = info
+			}
+		}
+	}
+
+	// Also load chokepoints
+	rows2, err := db.Query(`
+		SELECT source_payload->>'pageid', source_payload->>'portid', 
+		       source_payload->>'fullname', COALESCE(source_payload->>'country', ''),
+		       COALESCE(source_payload->>'iso3', source_payload->>'ISO3', ''),
+		       'chokepoint', ST_Y(geom), ST_X(geom)
+		FROM chokepoints WHERE source_payload->>'pageid' IS NOT NULL
+	`)
+	if err == nil {
+		defer rows2.Close()
+		for rows2.Next() {
+			var info portWatchPortInfo
+			var pageID string
+			if err := rows2.Scan(&pageID, &info.PortID, &info.FullName, &info.Country, &info.ISO3, &info.PortType, &info.Lat, &info.Lon); err == nil {
+				pageIDMap[pageID] = info
+			}
+		}
+	}
+
+	log.Printf("[portwatch] loaded %d pageID mappings from DB", len(pageIDMap))
+}
+
 func lookupPortByPageID(db *sql.DB, pageID string) (*PortWatchPageResult, error) {
 	var name, country, iso3, portType string
 	var lat, lon float64
 	var portID string
 
-	// Try ports table first (our ingested data)
-	err := db.QueryRow(`
-		SELECT source_payload->>'portname', source_payload->>'country', 
-		       COALESCE(source_payload->>'iso3', source_payload->>'ISO3', ''),
-		       'port', source_payload->>'portid'
-		FROM ports WHERE source_payload->>'pageid' = $1
-	`, pageID).Scan(&name, &country, &iso3, &portType, &portID)
-
-	if err != nil {
-		// Try chokepoints table
-		err = db.QueryRow(`
-			SELECT source_payload->>'portname', COALESCE(source_payload->>'country', ''),
+	// First check our in-memory map (covers ALL ports from DB)
+	if info, ok := pageIDMap[pageID]; ok {
+		portID = info.PortID
+		name = info.FullName
+		country = info.Country
+		iso3 = info.ISO3
+		portType = info.PortType
+		lat = info.Lat
+		lon = info.Lon
+	} else {
+		// Fall back to direct DB query
+		err := db.QueryRow(`
+			SELECT source_payload->>'portname', source_payload->>'country', 
 			       COALESCE(source_payload->>'iso3', source_payload->>'ISO3', ''),
-			       'chokepoint', source_payload->>'portid'
-			FROM chokepoints WHERE source_payload->>'pageid' = $1
+			       'port', source_payload->>'portid'
+			FROM ports WHERE source_payload->>'pageid' = $1
 		`, pageID).Scan(&name, &country, &iso3, &portType, &portID)
+
+		if err != nil {
+			// Try chokepoints table
+			err = db.QueryRow(`
+				SELECT source_payload->>'portname', COALESCE(source_payload->>'country', ''),
+				       COALESCE(source_payload->>'iso3', source_payload->>'ISO3', ''),
+				       'chokepoint', source_payload->>'portid'
+				FROM chokepoints WHERE source_payload->>'pageid' = $1
+			`, pageID).Scan(&name, &country, &iso3, &portType, &portID)
+		}
+
+		if err != nil {
+			// If all lookups fail, return a minimal response with external link
+			return &PortWatchPageResult{
+				PageID:          pageID,
+				PortType:        "unknown",
+				ExternalURL:     fmt.Sprintf("https://portwatch.imf.org/pages/%s", pageID),
+				UnavailableData: getDefaultUnavailableData(pageID),
+			}, nil
+		}
+
+		// Get coordinates
+		if portType == "port" {
+			db.QueryRow(`SELECT ST_Y(geom), ST_X(geom) FROM ports WHERE source_payload->>'pageid' = $1`, pageID).Scan(&lat, &lon)
+		} else {
+			db.QueryRow(`SELECT ST_Y(geom), ST_X(geom) FROM chokepoints WHERE source_payload->>'pageid' = $1`, pageID).Scan(&lat, &lon)
+		}
 	}
 
-	if err != nil {
-		// If all DB lookups fail, return a minimal response with external link
+	// If we still don't have a portID, this port has no PortWatch data
+	if portID == "" {
 		return &PortWatchPageResult{
 			PageID:          pageID,
-			PortType:        "unknown",
+			Name:            name,
+			Country:         country,
+			PortType:        portType,
 			ExternalURL:     fmt.Sprintf("https://portwatch.imf.org/pages/%s", pageID),
 			UnavailableData: getDefaultUnavailableData(pageID),
 		}, nil
-	}
-
-	// Get coordinates from DB (try ports first, then chokepoints)
-	if portType == "port" {
-		db.QueryRow(`SELECT ST_Y(geom), ST_X(geom) FROM ports WHERE source_payload->>'pageid' = $1`, pageID).Scan(&lat, &lon)
-	} else {
-		db.QueryRow(`SELECT ST_Y(geom), ST_X(geom) FROM chokepoints WHERE source_payload->>'pageid' = $1`, pageID).Scan(&lat, &lon)
 	}
 
 	result := &PortWatchPageResult{

@@ -393,6 +393,9 @@ func main() {
 	// Store DB reference for AIS streaming
 	aisDB = db
 
+	// Load the PortWatch pageid → portid mapping into memory
+	loadPortWatchMapping(db)
+
 	// ——— AIS streaming setup ———
 	aisAPIKey := os.Getenv("AISSTREAM_API_KEY")
 
