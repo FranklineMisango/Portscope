@@ -30,7 +30,8 @@ Key capabilities:
 
 Below is a simplified architecture view. The repo contains deployable artifacts for each component.
 
-```mermaid
+```
+mermaid
 flowchart LR
   F[Frontend: JavaScript (simple SPA)] -->|API calls| API[API Gateway: Go]
   API --> DB[Postgres + PostGIS]
@@ -136,7 +137,3 @@ Please open issues and PRs. For local testing, prefer running via `docker compos
 
 ## License
 This project is licensed under the MIT License — see `LICENSE` for details.
-
----
-
-If you want, I can also add a small architecture PNG or update the `monitoring/` dashboard snapshots into the repo — would you like me to add a rendered diagram? 
