@@ -30,8 +30,9 @@ Key capabilities:
 
 Below is a simplified architecture view. The repo contains deployable artifacts for each component.
 
+
 ```
-```mermaid
+mermaid
 flowchart LR
   F[Frontend] --> API[API Gateway]
   API --> DB[Postgres]
