@@ -43,7 +43,7 @@ function normalizeFeatureCollection(collection, kind) {
 	return collection.features.map((feature, index) => {
 		const properties = feature.properties || {};
 		return {
-			id: properties.ObjectId || properties.portid || index + 1,
+			id: properties.id || properties.ObjectId || properties.portid || index + 1,
 			pageid: properties.pageid || '',
 			name: properties.fullname || properties.portname || properties.portid || `Unnamed ${kind}`,
 			country: properties.country || '',
@@ -115,6 +115,13 @@ function App() {
 	const [ports, setPorts] = React.useState([]);
 	const [chokepoints, setChokepoints] = React.useState([]);
 	const [selectedItem, setSelectedItem] = React.useState(null);
+	const [mapMode, setMapMode] = React.useState(() => {
+		try {
+			return window.localStorage.getItem('portscope-map-mode') || '2d';
+		} catch (e) {
+			return '2d';
+		}
+	});
 	const [status, setStatus] = React.useState('Loading PortWatch datasets...');
 	const [pwData, setPwData] = React.useState(null);
 	const [pwLoading, setPwLoading] = React.useState(false);
@@ -123,11 +130,61 @@ function App() {
 	const mapRef = React.useRef(null);
 	const portLayerRef = React.useRef(null);
 	const chokepointLayerRef = React.useRef(null);
+	const canvasRendererRef = React.useRef(null);
+	const portMarkersRef = React.useRef(new Map());
+	const chokepointMarkersRef = React.useRef(new Map());
+	const renderTimeoutRef = React.useRef(null);
+	const viewStateRef = React.useRef({ center: [20, 20], zoom: 2, bearing: 0, pitch: 0 });
 	const pwPrevPageid = React.useRef(null);
+	const dataLoadedRef = React.useRef(false);
+	const [mapReady, setMapReady] = React.useState(false);
 
 	function selectItem(type, data) {
 		setSelectedItem({ type, data });
 		setStatus(`${data.name} selected.`);
+	}
+
+	function setMode(nextMode) {
+		try {
+			if (mapRef.current && typeof mapRef.current.getCenter === 'function') {
+				const center = mapRef.current.getCenter();
+				viewStateRef.current = {
+					center: [center.lng, center.lat],
+					zoom: typeof mapRef.current.getZoom === 'function' ? mapRef.current.getZoom() : viewStateRef.current.zoom,
+					bearing: typeof mapRef.current.getBearing === 'function' ? mapRef.current.getBearing() : viewStateRef.current.bearing,
+					pitch: typeof mapRef.current.getPitch === 'function' ? mapRef.current.getPitch() : viewStateRef.current.pitch,
+				};
+			}
+		} catch (e) {}
+		setMapReady(false);
+		setMapMode(nextMode);
+		try {
+			window.localStorage.setItem('portscope-map-mode', nextMode);
+		} catch (e) {}
+		setStatus(nextMode === 'globe' ? 'Globe mode enabled.' : 'Fixed 2D mode enabled.');
+	}
+
+	function findRecordByFeature(feature, records) {
+		if (!feature || !feature.properties) return null;
+		const featureId = feature.properties.id || feature.properties.ID || feature.properties.objectid || feature.properties.ObjectId || feature.properties.portid;
+		const featureName = feature.properties.name || feature.properties.fullname || feature.properties.portname || feature.properties.portid;
+		const featurePageId = feature.properties.pageid || feature.properties.PageId || feature.properties.PAGEID;
+		if (featureId !== undefined && featureId !== null) {
+			const numericId = Number(featureId);
+			const byId = records.find(record => Number(record.id) === numericId || String(record.id) === String(featureId));
+			if (byId) return byId;
+		}
+		if (featurePageId) {
+			const loweredPageId = String(featurePageId).toLowerCase();
+			const byPageId = records.find(record => String(record.pageid || '').toLowerCase() === loweredPageId);
+			if (byPageId) return byPageId;
+		}
+		if (featureName) {
+			const lowered = String(featureName).toLowerCase();
+			const byName = records.find(record => String(record.name || '').toLowerCase() === lowered);
+			if (byName) return byName;
+		}
+		return null;
 	}
 
 	// Fetch PortWatch data
@@ -164,45 +221,86 @@ function App() {
 	}, [selectedItem]);
 
 	function renderLayers() {
-		if (!portLayerRef.current || !chokepointLayerRef.current) return;
-		portLayerRef.current.clearLayers();
-		chokepointLayerRef.current.clearLayers();
+		// Debounce rendering to avoid jank during rapid updates
+		if (renderTimeoutRef.current) clearTimeout(renderTimeoutRef.current);
+		renderTimeoutRef.current = setTimeout(() => {
+			if (!portLayerRef.current || !chokepointLayerRef.current) return;
+			const hasSelection = Boolean(selectedItem);
 
-		const hasSelection = Boolean(selectedItem);
-
-		ports.forEach(item => {
-			const coords = pointFromGeometry(item.geom);
-			if (!coords) return;
-			const [lon, lat] = coords;
-			const active = hasSelection && selectedItem.type === 'port' && selectedItem.data.id === item.id;
-			const marker = L.circleMarker([lat, lon], {
-				radius: active ? 10 : 7,
-				color: active ? '#63d6ff' : '#8a7dff',
-				weight: 2,
-				fillColor: active ? '#63d6ff' : '#c9c1ff',
-				fillOpacity: 0.92,
+			// Ports: remove stale, update existing, add new
+			const newPortIds = new Set(ports.map(p => p.id));
+			const existingPorts = portMarkersRef.current;
+			existingPorts.forEach((marker, id) => {
+				if (!newPortIds.has(id)) {
+					portLayerRef.current.removeLayer(marker);
+					existingPorts.delete(id);
+				}
 			});
-			marker.bindTooltip(`<b>${item.name}</b><br/>Port intelligence`, { direction: 'top', offset: [0, -8] });
-			marker.on('click', () => selectItem('port', item));
-			marker.addTo(portLayerRef.current);
-		});
-
-		chokepoints.forEach(item => {
-			const coords = pointFromGeometry(item.geom);
-			if (!coords) return;
-			const [lon, lat] = coords;
-			const active = hasSelection && selectedItem.type === 'chokepoint' && selectedItem.data.id === item.id;
-			const marker = L.circleMarker([lat, lon], {
-				radius: active ? 9 : 6,
-				color: active ? '#ffcc66' : '#ff8a5b',
-				weight: 2,
-				fillColor: active ? '#ffcc66' : '#ffb38f',
-				fillOpacity: 0.95,
+			ports.forEach(item => {
+				const coords = pointFromGeometry(item.geom);
+				if (!coords) return;
+				const [lon, lat] = coords;
+				const active = hasSelection && selectedItem.type === 'port' && selectedItem.data.id === item.id;
+				const style = { radius: active ? 10 : 7, color: active ? '#63d6ff' : '#8a7dff', weight: 2, fillColor: active ? '#63d6ff' : '#c9c1ff', fillOpacity: 0.92 };
+				if (existingPorts.has(item.id)) {
+					const m = existingPorts.get(item.id);
+					m.setLatLng([lat, lon]);
+					if (m.setStyle) m.setStyle(style);
+				} else {
+					const marker = L.circleMarker([lat, lon], Object.assign({}, style, { renderer: canvasRendererRef.current }));
+					marker.bindTooltip(`<b>${item.name}</b><br/>Port intelligence`, { direction: 'top', offset: [0, -8] });
+					marker.on('click', () => selectItem('port', item));
+					portLayerRef.current.addLayer(marker);
+					existingPorts.set(item.id, marker);
+				}
 			});
-			marker.bindTooltip(`<b>${item.name}</b><br/>Chokepoint intensity`, { direction: 'top', offset: [0, -8] });
-			marker.on('click', () => selectItem('chokepoint', item));
-			marker.addTo(chokepointLayerRef.current);
-		});
+
+			// Chokepoints: same workflow
+			const newChokeIds = new Set(chokepoints.map(p => p.id));
+			const existingChokes = chokepointMarkersRef.current;
+			existingChokes.forEach((marker, id) => {
+				if (!newChokeIds.has(id)) {
+					chokepointLayerRef.current.removeLayer(marker);
+					existingChokes.delete(id);
+				}
+			});
+			chokepoints.forEach(item => {
+				const coords = pointFromGeometry(item.geom);
+				if (!coords) return;
+				const [lon, lat] = coords;
+				const active = hasSelection && selectedItem.type === 'chokepoint' && selectedItem.data.id === item.id;
+				const style = { radius: active ? 9 : 6, color: active ? '#ffcc66' : '#ff8a5b', weight: 2, fillColor: active ? '#ffcc66' : '#ffb38f', fillOpacity: 0.95 };
+				if (existingChokes.has(item.id)) {
+					const m = existingChokes.get(item.id);
+					m.setLatLng([lat, lon]);
+					if (m.setStyle) m.setStyle(style);
+				} else {
+					const marker = L.circleMarker([lat, lon], Object.assign({}, style, { renderer: canvasRendererRef.current }));
+					marker.bindTooltip(`<b>${item.name}</b><br/>Chokepoint intensity`, { direction: 'top', offset: [0, -8] });
+					marker.on('click', () => selectItem('chokepoint', item));
+					chokepointLayerRef.current.addLayer(marker);
+					existingChokes.set(item.id, marker);
+				}
+			});
+		}, 40);
+	}
+
+	function clearMapArtifacts() {
+		if (renderTimeoutRef.current) {
+			clearTimeout(renderTimeoutRef.current);
+			renderTimeoutRef.current = null;
+		}
+		if (mapRef.current) {
+			try { mapRef.current.remove(); } catch (e) {}
+			mapRef.current = null;
+		}
+		portLayerRef.current = null;
+		chokepointLayerRef.current = null;
+		canvasRendererRef.current = null;
+		portMarkersRef.current = new Map();
+		chokepointMarkersRef.current = new Map();
+		dataLoadedRef.current = false;
+		setMapReady(false);
 	}
 
 	async function loadData() {
@@ -235,28 +333,225 @@ function App() {
 	}
 
 	React.useEffect(() => {
-		if (typeof L === 'undefined') {
-			setStatus('Leaflet library not loaded; map unavailable.');
-			return;
-		}
+		clearMapArtifacts();
 		setTimeout(() => {
 			const mapEl = document.getElementById('map');
-			if (!mapEl || mapEl._leaflet_id) return;
-			mapRef.current = L.map('map', { zoomControl: true, worldCopyJump: true }).setView([20, 20], 2);
+			if (!mapEl) return;
+
+			// Fixed 2D mode uses Leaflet; globe mode uses MapLibre.
+			if (mapMode === 'globe' && typeof maplibregl !== 'undefined') {
+				mapRef.current = new maplibregl.Map({
+					container: 'map',
+					style: {
+						version: 8,
+						sources: {},
+						layers: [
+							{ id: 'background', type: 'background', paint: { 'background-color': '#061018' } }
+						]
+					},
+					center: viewStateRef.current.center,
+					zoom: viewStateRef.current.zoom,
+					renderWorldCopies: false,
+					projection: 'globe',
+					dragRotate: true,
+					pitchWithRotate: true,
+					keyboard: true,
+				});
+
+				try { mapRef.current.setPitch(Math.max(35, viewStateRef.current.pitch || 35)); } catch (e) {}
+				try { mapRef.current.setBearing(viewStateRef.current.bearing || 0); } catch (e) {}
+				try { mapRef.current.setFog({}); } catch (e) {}
+
+				mapRef.current.on('load', () => {
+					// Add a raster basemap as visual context (Carto dark tiles)
+					try {
+						mapRef.current.addSource('basemap', {
+							type: 'raster',
+							tiles: [
+								'https://a.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
+								'https://b.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
+								'https://c.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png'
+							],
+							tileSize: 256,
+						});
+						mapRef.current.addLayer({ id: 'basemap-layer', type: 'raster', source: 'basemap' });
+					} catch (e) {
+						// ignore if basemap fails to add
+					}
+
+					// Add vector tile sources
+					mapRef.current.addSource('ports', {
+						type: 'vector',
+						tiles: [apiUrl('/tiles/ports/{z}/{x}/{y}.pbf')],
+						maxzoom: 14,
+					});
+					mapRef.current.addLayer({
+						id: 'ports-layer',
+						type: 'circle',
+						source: 'ports',
+						'source-layer': 'ports',
+						paint: {
+							'circle-radius': 4,
+							'circle-color': '#8a7dff',
+							'circle-stroke-color': '#08111f',
+							'circle-stroke-width': 1,
+							'circle-opacity': 0.95,
+						},
+					});
+
+					mapRef.current.addSource('chokepoints', {
+						type: 'vector',
+						tiles: [apiUrl('/tiles/chokepoints/{z}/{x}/{y}.pbf')],
+						maxzoom: 14,
+					});
+					mapRef.current.addLayer({
+						id: 'chokepoints-layer',
+						type: 'circle',
+						source: 'chokepoints',
+						'source-layer': 'chokepoints',
+						paint: {
+							'circle-radius': 3.5,
+							'circle-color': '#ff8a5b',
+							'circle-stroke-color': '#08111f',
+							'circle-stroke-width': 1,
+							'circle-opacity': 0.95,
+						},
+					});
+
+					// Highlight layers (empty filter initially)
+					mapRef.current.addLayer({
+						id: 'ports-highlight',
+						type: 'circle',
+						source: 'ports',
+						'source-layer': 'ports',
+						paint: { 'circle-radius': 8, 'circle-color': '#63d6ff', 'circle-opacity': 0.95 },
+						filter: ['==', 'id', ''],
+					});
+					mapRef.current.addLayer({
+						id: 'chokepoints-highlight',
+						type: 'circle',
+						source: 'chokepoints',
+						'source-layer': 'chokepoints',
+						paint: { 'circle-radius': 8, 'circle-color': '#ffcc66', 'circle-opacity': 0.95 },
+						filter: ['==', 'id', ''],
+					});
+
+					// Click handlers
+					mapRef.current.on('click', 'ports-layer', (e) => {
+						const feat = e.features && e.features[0];
+						const record = findRecordByFeature(feat, ports);
+						if (record) selectItem('port', record);
+					});
+						mapRef.current.on('mouseenter', 'ports-layer', () => {
+							mapRef.current.getCanvas().style.cursor = 'pointer';
+						});
+						mapRef.current.on('mouseleave', 'ports-layer', () => {
+							mapRef.current.getCanvas().style.cursor = '';
+						});
+					mapRef.current.on('click', 'chokepoints-layer', (e) => {
+						const feat = e.features && e.features[0];
+						const record = findRecordByFeature(feat, chokepoints);
+						if (record) selectItem('chokepoint', record);
+					});
+						mapRef.current.on('mouseenter', 'chokepoints-layer', () => {
+							mapRef.current.getCanvas().style.cursor = 'pointer';
+						});
+						mapRef.current.on('mouseleave', 'chokepoints-layer', () => {
+							mapRef.current.getCanvas().style.cursor = '';
+						});
+
+						mapRef.current.on('moveend', () => {
+							try {
+								const center = mapRef.current.getCenter();
+								viewStateRef.current = {
+									center: [center.lng, center.lat],
+									zoom: mapRef.current.getZoom(),
+									bearing: mapRef.current.getBearing(),
+									pitch: mapRef.current.getPitch(),
+								};
+							} catch (e) {}
+						});
+
+						// Fallback click path if the layer event misses in some browsers
+						mapRef.current.on('click', (e) => {
+							const hits = mapRef.current.queryRenderedFeatures(e.point, {
+								layers: ['ports-layer', 'chokepoints-layer']
+							});
+							if (!hits || hits.length === 0) return;
+							const hit = hits[0];
+							if (hit.layer && hit.layer.id === 'ports-layer') {
+								const record = findRecordByFeature(hit, ports);
+								if (record) selectItem('port', record);
+							} else if (hit.layer && hit.layer.id === 'chokepoints-layer') {
+								const record = findRecordByFeature(hit, chokepoints);
+								if (record) selectItem('chokepoint', record);
+							}
+						});
+
+						setMapReady(true);
+				});
+
+				loadData();
+				return;
+			}
+
+			// Leaflet default: fixed-view 2D map with clustering and canvas markers.
+			if (typeof L === 'undefined') {
+				setStatus('Map libraries not loaded; map unavailable.');
+				return;
+			}
+			const mapEl2 = document.getElementById('map');
+			if (!mapEl2 || mapEl2._leaflet_id) return;
+			mapRef.current = L.map('map', {
+				zoomControl: true,
+				worldCopyJump: false,
+				dragging: false,
+				scrollWheelZoom: true,
+				doubleClickZoom: true,
+				boxZoom: false,
+				keyboard: false,
+				maxBounds: [[-180, -80], [180, 85]],
+				maxBoundsViscosity: 1.0,
+			}).setView([viewStateRef.current.center[1], viewStateRef.current.center[0]], viewStateRef.current.zoom);
 			L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+			L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
 				maxZoom: 19,
 				attribution: '&copy; OpenStreetMap contributors &copy; CARTO',
 			}).addTo(mapRef.current);
-			portLayerRef.current = L.layerGroup().addTo(mapRef.current);
-			chokepointLayerRef.current = L.layerGroup().addTo(mapRef.current);
+			mapRef.current.on('moveend zoomend', () => {
+				const center = mapRef.current.getCenter();
+				viewStateRef.current = {
+					center: [center.lng, center.lat],
+					zoom: mapRef.current.getZoom(),
+					bearing: 0,
+					pitch: 0,
+				};
+			});
+			// Canvas renderer for faster vector draws
+			canvasRendererRef.current = L.canvas({ padding: 0.5 });
+			// Marker clustering (uses leaflet.markercluster included in index.html)
+			portLayerRef.current = L.markerClusterGroup({
+				chunkedLoading: true,
+				spiderfyOnMaxZoom: false,
+				showCoverageOnHover: false,
+				maxClusterRadius: 48,
+				disableClusteringAtZoom: 10,
+			}).addTo(mapRef.current);
+			chokepointLayerRef.current = L.markerClusterGroup({
+				chunkedLoading: true,
+				spiderfyOnMaxZoom: false,
+				showCoverageOnHover: false,
+				maxClusterRadius: 40,
+				disableClusteringAtZoom: 10,
+			}).addTo(mapRef.current);
+			setMapReady(true);
 			loadData();
 		}, 50);
 		return () => {
-			if (mapRef.current) { mapRef.current.remove(); mapRef.current = null; }
+			clearMapArtifacts();
 		};
-	}, []);
+	}, [mapMode]);
 
-	const dataLoadedRef = React.useRef(false);
 	React.useEffect(() => {
 		if (!mapRef.current) return;
 		if ((ports.length === 0 && chokepoints.length === 0)) return;
@@ -265,14 +560,67 @@ function App() {
 			dataLoadedRef.current = true;
 			setTimeout(() => {
 				if (!mapRef.current) return;
-				mapRef.current.invalidateSize();
+				// Resize for MapLibre or Leaflet
+				if (mapRef.current.resize) {
+					try { mapRef.current.resize(); } catch (e) {}
+				} else if (mapRef.current.invalidateSize) {
+					try { mapRef.current.invalidateSize(); } catch (e) {}
+				}
 				const allCoords = [];
 				ports.forEach(p => { const c = pointFromGeometry(p.geom); if (c) allCoords.push([c[1], c[0]]); });
 				chokepoints.forEach(p => { const c = pointFromGeometry(p.geom); if (c) allCoords.push([c[1], c[0]]); });
-				mapRef.current.fitBounds(allCoords, { padding: [30, 30], maxZoom: 4 });
+				if (typeof maplibregl !== 'undefined' && mapRef.current && mapRef.current.fitBounds) {
+					// MapLibre expects [[minLon,minLat],[maxLon,maxLat]]
+					const lonlats = allCoords.map(([lat, lon]) => [lon, lat]);
+					if (lonlats.length > 0) {
+						let minLon = lonlats[0][0], minLat = lonlats[0][1], maxLon = lonlats[0][0], maxLat = lonlats[0][1];
+						lonlats.forEach(([lon, lat]) => {
+							if (lon < minLon) minLon = lon;
+							if (lon > maxLon) maxLon = lon;
+							if (lat < minLat) minLat = lat;
+							if (lat > maxLat) maxLat = lat;
+						});
+						mapRef.current.fitBounds([[minLon, minLat], [maxLon, maxLat]], { padding: 30, maxZoom: 4 });
+					}
+				} else {
+					try { mapRef.current.fitBounds(allCoords, { padding: [30, 30], maxZoom: 4 }); } catch (e) {}
+				}
 			}, 200);
 		}
 	}, [ports, chokepoints]);
+
+	// When selection changes, update MapLibre highlight filters (if used)
+	React.useEffect(() => {
+		if (!mapRef.current || typeof maplibregl === 'undefined') return;
+		if (!selectedItem) {
+			try { mapRef.current.setFilter('ports-highlight', ['==', 'id', '']); } catch (e) {}
+			try { mapRef.current.setFilter('chokepoints-highlight', ['==', 'id', '']); } catch (e) {}
+			return;
+		}
+		if (selectedItem.type === 'port') {
+			try { mapRef.current.setFilter('ports-highlight', ['==', 'id', Number(selectedItem.data.id)]); } catch (e) {}
+			try { mapRef.current.setFilter('chokepoints-highlight', ['==', 'id', '']); } catch (e) {}
+		} else if (selectedItem.type === 'chokepoint') {
+			try { mapRef.current.setFilter('chokepoints-highlight', ['==', 'id', Number(selectedItem.data.id)]); } catch (e) {}
+			try { mapRef.current.setFilter('ports-highlight', ['==', 'id', '']); } catch (e) {}
+		}
+	}, [selectedItem]);
+
+	React.useEffect(() => {
+		if (!mapRef.current) return;
+		if (mapMode !== 'globe') return;
+		if (typeof maplibregl === 'undefined') return;
+		if (!mapRef.current.setProjection) return;
+		try { mapRef.current.setProjection({ type: 'globe' }); } catch (e) {}
+	}, [mapMode]);
+
+	const mapLegend = e('div', { className: 'map-legend' },
+		e('div', { className: 'legend-title' }, 'Legend'),
+		e('div', { className: 'legend-row' }, e('span', { className: 'legend-swatch legend-port' }), e('span', null, 'Port')),
+		e('div', { className: 'legend-row' }, e('span', { className: 'legend-swatch legend-chokepoint' }), e('span', null, 'Chokepoint')),
+		e('div', { className: 'legend-row' }, e('span', { className: 'legend-swatch legend-selected' }), e('span', null, 'Selected')),
+		e('div', { className: 'legend-note' }, mapMode === 'globe' ? 'Globe mode is optional.' : 'Fixed 2D mode is the default.')
+	);
 
 	const selectedData = selectedItem ? selectedItem.data : null;
 	const selectedDate = selectedData ? selectedData.observed_on : null;
@@ -343,12 +691,39 @@ function App() {
 					)
 				)
 			),
-			e('div', { className: 'map-shell' },
+			e('div', { className: `map-shell ${mapReady ? 'is-ready' : 'is-loading'} ${mapMode === 'globe' ? 'mode-globe' : 'mode-2d'}` },
 				e('div', { className: 'map-header' },
 					e('div', { className: 'map-card' },
 						e('span', { className: 'eyebrow' }, 'Map view'),
-						e('h3', null, 'Global port activity'),
-						e('p', null, 'Click a point to load details.')
+						e('h3', null, mapMode === 'globe' ? '3D globe mode' : 'Fixed 2D map'),
+						e('p', null, mapMode === 'globe' ? 'Globe mode is optional. Click a point to load details.' : 'Fixed dashboard view. Click a point to load details.'),
+						e('div', { style: { display: 'flex', gap: '8px', marginTop: '10px', flexWrap: 'wrap' } },
+							e('button', {
+								type: 'button',
+								onClick: () => setMode('2d'),
+								style: {
+									padding: '7px 10px',
+									borderRadius: '999px',
+									border: '1px solid var(--border)',
+									background: mapMode === '2d' ? 'rgba(99, 214, 255, 0.18)' : 'rgba(255, 255, 255, 0.04)',
+									color: 'var(--text)',
+									cursor: 'pointer'
+								}
+							}, 'Fixed 2D'),
+							e('button', {
+								type: 'button',
+								onClick: () => setMode('globe'),
+								style: {
+									padding: '7px 10px',
+									borderRadius: '999px',
+									border: '1px solid var(--border)',
+									background: mapMode === 'globe' ? 'rgba(99, 214, 255, 0.18)' : 'rgba(255, 255, 255, 0.04)',
+									color: 'var(--text)',
+									cursor: 'pointer'
+								}
+							}, '3D Globe')
+						),
+						mapLegend
 					)
 				),
 				e('div', { id: 'map' })

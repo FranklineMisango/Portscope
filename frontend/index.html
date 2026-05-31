@@ -253,7 +253,7 @@
       }
 
       .leaflet-container {
-        background: #08111f;
+        background: #dbe7f3;
       }
 
       .map-shell {
@@ -261,6 +261,23 @@
         height: 100%;
         min-height: 0;
         overflow: hidden;
+        background: radial-gradient(circle at 50% 50%, rgba(99, 214, 255, 0.08), transparent 45%), #dbe7f3;
+      }
+
+      .map-shell #map {
+        transition: opacity 180ms ease, filter 180ms ease, transform 180ms ease;
+      }
+
+      .map-shell.is-loading #map {
+        opacity: 0.25;
+        filter: saturate(0.85) blur(0.2px);
+        transform: scale(0.996);
+      }
+
+      .map-shell.is-ready #map {
+        opacity: 1;
+        filter: none;
+        transform: scale(1);
       }
 
       .map-header {
@@ -283,6 +300,52 @@
       .map-card h3 {
         margin: 4px 0 6px;
         font-size: 18px;
+      }
+
+      .map-legend {
+        margin-top: 10px;
+        padding: 10px 12px;
+        border-radius: 14px;
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        background: rgba(7, 12, 20, 0.68);
+        backdrop-filter: blur(10px);
+      }
+
+      .legend-title {
+        font-size: 10px;
+        text-transform: uppercase;
+        letter-spacing: 0.12em;
+        color: var(--muted);
+        margin-bottom: 8px;
+      }
+
+      .legend-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 12px;
+        color: var(--text);
+        margin-top: 6px;
+      }
+
+      .legend-swatch {
+        width: 12px;
+        height: 12px;
+        border-radius: 999px;
+        border: 1px solid rgba(255, 255, 255, 0.25);
+        box-shadow: 0 0 16px rgba(255, 255, 255, 0.08);
+        flex-shrink: 0;
+      }
+
+      .legend-port { background: #8a7dff; }
+      .legend-chokepoint { background: #ff8a5b; }
+      .legend-selected { background: #63d6ff; }
+
+      .legend-note {
+        margin-top: 8px;
+        color: var(--muted);
+        font-size: 11px;
+        line-height: 1.35;
       }
 
       /* Right sidebar styles */
@@ -449,6 +512,8 @@
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
-    <script src="/app.js?v=4"></script>
+    <link href="https://unpkg.com/maplibre-gl@2.4.0/dist/maplibre-gl.css" rel="stylesheet" />
+    <script src="https://unpkg.com/maplibre-gl@2.4.0/dist/maplibre-gl.js"></script>
+    <script src="/app.js?v=5"></script>
   </body>
 </html>

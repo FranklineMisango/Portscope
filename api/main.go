@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+	"bytes"
+	"compress/gzip"
 
 	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
@@ -70,6 +72,31 @@ func portBoundingBox(lat, lon, radiusKm float64) [][]float64 {
 		{lat - latDelta, lon - lonDelta},
 		{lat + latDelta, lon + lonDelta},
 	}
+}
+
+// tileBBoxMercator returns the bounding box in EPSG:3857 meters for a given XYZ tile
+func tileBBoxMercator(z, x, y int) (minx, miny, maxx, maxy float64) {
+	n := math.Pow(2, float64(z))
+	lon1 := float64(x)/n*360.0 - 180.0
+	lon2 := float64(x+1)/n*360.0 - 180.0
+	lat1 := tileYToLat(y, z)
+	lat2 := tileYToLat(y+1, z)
+	minx, miny = lonLatToMerc(lon1, lat2)
+	maxx, maxy = lonLatToMerc(lon2, lat1)
+	return
+}
+
+func tileYToLat(y, z int) float64 {
+	n := math.Pi - (2.0*math.Pi*float64(y))/math.Pow(2, float64(z))
+	lat := math.Atan(math.Sinh(n)) * 180.0 / math.Pi
+	return lat
+}
+
+func lonLatToMerc(lon, lat float64) (x, y float64) {
+	x = lon * 20037508.34 / 180.0
+	y = math.Log(math.Tan((90.0+lat)*math.Pi/360.0)) / (math.Pi/180.0)
+	y = y * 20037508.34 / 180.0
+	return
 }
 
 // updateAISSubscription connects/reconnects to aisstream.io with the given bounding box for a port.
@@ -403,6 +430,77 @@ func main() {
 	c = cache.New(30*time.Second, 1*time.Minute)
 
 	r := mux.NewRouter()
+
+	// Vector tile endpoints (ports and chokepoints)
+	r.HandleFunc("/tiles/ports/{z:[0-9]+}/{x:[0-9]+}/{y:[0-9]+}.pbf", func(w http.ResponseWriter, r *http.Request) {
+		vars := mux.Vars(r)
+		z, _ := strconv.Atoi(vars["z"])
+		x, _ := strconv.Atoi(vars["x"])
+		y, _ := strconv.Atoi(vars["y"])
+		minx, miny, maxx, maxy := tileBBoxMercator(z, x, y)
+
+		qry := `WITH mvtgeom AS (
+			SELECT id, name, ST_AsMVTGeom(ST_Transform(geom,3857), ST_MakeEnvelope($1,$2,$3,$4,3857)) AS geom
+			FROM ports
+			WHERE ST_Intersects(ST_Transform(geom,3857), ST_MakeEnvelope($1,$2,$3,$4,3857))
+		) SELECT ST_AsMVT(mvtgeom, 'ports', 4096, 'geom') FROM mvtgeom;`
+
+		var buf []byte
+		row := db.QueryRow(qry, minx, miny, maxx, maxy)
+		if err := row.Scan(&buf); err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		// Gzip the buffer on the fly
+		var gzBuf bytes.Buffer
+		gz := gzip.NewWriter(&gzBuf)
+		if _, err := gz.Write(buf); err == nil {
+			gz.Close()
+			w.Header().Set("Content-Encoding", "gzip")
+			w.Header().Set("Content-Type", "application/x-protobuf")
+			w.Header().Set("Cache-Control", "public, max-age=86400")
+			http.ServeContent(w, r, "ports.pbf", time.Now(), bytes.NewReader(gzBuf.Bytes()))
+			return
+		}
+		// fallback
+		w.Header().Set("Content-Type", "application/x-protobuf")
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		http.ServeContent(w, r, "ports.pbf", time.Now(), bytes.NewReader(buf))
+	}).Methods("GET")
+
+	r.HandleFunc("/tiles/chokepoints/{z:[0-9]+}/{x:[0-9]+}/{y:[0-9]+}.pbf", func(w http.ResponseWriter, r *http.Request) {
+		vars := mux.Vars(r)
+		z, _ := strconv.Atoi(vars["z"])
+		x, _ := strconv.Atoi(vars["x"])
+		y, _ := strconv.Atoi(vars["y"])
+		minx, miny, maxx, maxy := tileBBoxMercator(z, x, y)
+
+		qry := `WITH mvtgeom AS (
+			SELECT id, name, ST_AsMVTGeom(ST_Transform(geom,3857), ST_MakeEnvelope($1,$2,$3,$4,3857)) AS geom
+			FROM chokepoints
+			WHERE ST_Intersects(ST_Transform(geom,3857), ST_MakeEnvelope($1,$2,$3,$4,3857))
+		) SELECT ST_AsMVT(mvtgeom, 'chokepoints', 4096, 'geom') FROM mvtgeom;`
+
+		var buf []byte
+		row := db.QueryRow(qry, minx, miny, maxx, maxy)
+		if err := row.Scan(&buf); err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		var gzBuf bytes.Buffer
+		gz := gzip.NewWriter(&gzBuf)
+		if _, err := gz.Write(buf); err == nil {
+			gz.Close()
+			w.Header().Set("Content-Encoding", "gzip")
+			w.Header().Set("Content-Type", "application/x-protobuf")
+			w.Header().Set("Cache-Control", "public, max-age=86400")
+			http.ServeContent(w, r, "chokepoints.pbf", time.Now(), bytes.NewReader(gzBuf.Bytes()))
+			return
+		}
+		w.Header().Set("Content-Type", "application/x-protobuf")
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		http.ServeContent(w, r, "chokepoints.pbf", time.Now(), bytes.NewReader(buf))
+	}).Methods("GET")
 
 	// simple API key auth middleware
 	apiKey := os.Getenv("API_KEY")
