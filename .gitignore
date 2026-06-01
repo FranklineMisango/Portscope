@@ -1,5 +1,5 @@
 # any env file in the codebase
-*.env
+**.env
 ingest/.env
 **__pycache__/
 *.log
