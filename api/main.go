@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -10,10 +12,9 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
-	"bytes"
-	"compress/gzip"
 
 	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
@@ -99,13 +100,31 @@ func lonLatToMerc(lon, lat float64) (x, y float64) {
 	return
 }
 
+// currentAISPort tracks which port we're currently streaming for reconnection
+type aisSubscriptionState struct {
+	apiKey string
+	lat    float64
+	lon    float64
+}
+
+var currentAISPort aisSubscriptionState
+var currentAISPortMu sync.Mutex
+
 // updateAISSubscription connects/reconnects to aisstream.io with the given bounding box for a port.
 // If lat/lon are zero, it closes the AIS connection (no active watch).
+// The connection is self-healing: it will automatically reconnect on failure.
 func updateAISSubscription(apiKey string, lat, lon float64) {
-	aisConnMu.Lock()
-	defer aisConnMu.Unlock()
+	// Track the desired port state for reconnection
+	currentAISPortMu.Lock()
+	if lat == 0 && lon == 0 {
+		currentAISPort = aisSubscriptionState{}
+	} else {
+		currentAISPort = aisSubscriptionState{apiKey: apiKey, lat: lat, lon: lon}
+	}
+	currentAISPortMu.Unlock()
 
-	// If we already have a connection, close it first
+	// Cancel any existing connection
+	aisConnMu.Lock()
 	if aisCancel != nil {
 		aisCancel()
 	}
@@ -113,6 +132,7 @@ func updateAISSubscription(apiKey string, lat, lon float64) {
 		aisConn.Close()
 		aisConn = nil
 	}
+	aisConnMu.Unlock()
 
 	// If no coordinates provided, we're done (disconnected)
 	if lat == 0 && lon == 0 {
@@ -125,105 +145,146 @@ func updateAISSubscription(apiKey string, lat, lon float64) {
 	boxes := [][][]float64{box}
 
 	ctx, cancel := context.WithCancel(context.Background())
+
+	aisConnMu.Lock()
 	aisCtx = ctx
 	aisCancel = cancel
+	aisConnMu.Unlock()
 
 	go func() {
-		log.Printf("[ais] connecting to aisstream.io for bounding box [[%v, %v], [%v, %v]]", box[0][0], box[0][1], box[1][0], box[1][1])
-
-		u := "wss://stream.aisstream.io/v0/stream"
-		c, _, err := websocket.DefaultDialer.Dial(u, nil)
-		if err != nil {
-			log.Printf("[ais] dial error: %v", err)
-			aisConnMu.Lock()
-			aisConn = nil
-			aisConnMu.Unlock()
-			return
-		}
-
-		// Send subscription message
-		subMsg := map[string]interface{}{
-			"APIKey":             apiKey,
-			"BoundingBoxes":      boxes,
-			"FilterMessageTypes": []string{"PositionReport"},
-		}
-		if err := c.WriteJSON(subMsg); err != nil {
-			log.Printf("[ais] write subscription error: %v", err)
-			c.Close()
-			return
-		}
-		log.Printf("[ais] subscription sent, receiving AIS data...")
-
-		aisConnMu.Lock()
-		aisConn = c
-		aisConnMu.Unlock()
-
-		// Set keepalive
-		pingTicker := time.NewTicker(30 * time.Second)
-		defer pingTicker.Stop()
-		c.SetPongHandler(func(string) error {
-			return c.SetReadDeadline(time.Now().Add(60 * time.Second))
-		})
-		c.SetReadDeadline(time.Now().Add(60 * time.Second))
-
-		// Batch insert to reduce DB pressure
-		batch := make([]map[string]interface{}, 0, 100)
-		flushBatch := func() {
-			if len(batch) == 0 {
-				return
-			}
-			if err := insertTrafficBatch(context.Background(), batch); err != nil {
-				log.Printf("[ais] batch insert error: %v", err)
-			}
-			batch = batch[:0]
-		}
-
-		batchTicker := time.NewTicker(5 * time.Second)
-		defer batchTicker.Stop()
+		const maxRetryDelay = 60 * time.Second
+		retryDelay := 1 * time.Second
 
 		for {
+			// Check if we've been cancelled (port deselected)
 			select {
 			case <-ctx.Done():
-				flushBatch()
-				c.Close()
-				aisConnMu.Lock()
-				aisConn = nil
-				aisConnMu.Unlock()
 				log.Println("[ais] connection closed (context done)")
 				return
-			case <-batchTicker.C:
-				flushBatch()
 			default:
 			}
 
-			_, message, err := c.ReadMessage()
+			log.Printf("[ais] connecting to aisstream.io for bounding box [[%v, %v], [%v, %v]]", box[0][0], box[0][1], box[1][0], box[1][1])
+
+			u := "wss://stream.aisstream.io/v0/stream"
+			c, _, err := websocket.DefaultDialer.Dial(u, nil)
 			if err != nil {
-				flushBatch()
-				log.Printf("[ais] read error: %v", err)
+				log.Printf("[ais] dial error: %v (retrying in %v)", err, retryDelay)
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(retryDelay):
+				}
+				retryDelay = minDuration(retryDelay*2, maxRetryDelay)
+				continue
+			}
+			// Reset retry delay on successful connection
+			retryDelay = 1 * time.Second
+
+			// Send subscription message
+			subMsg := map[string]interface{}{
+				"APIKey":             apiKey,
+				"BoundingBoxes":      boxes,
+				"FilterMessageTypes": []string{"PositionReport"},
+			}
+			if err := c.WriteJSON(subMsg); err != nil {
+				log.Printf("[ais] write subscription error: %v", err)
 				c.Close()
-				aisConnMu.Lock()
-				aisConn = nil
-				aisConnMu.Unlock()
-				return
-			}
-
-			var msg map[string]interface{}
-			if err := json.Unmarshal(message, &msg); err != nil {
 				continue
 			}
+			log.Printf("[ais] subscription sent, receiving AIS data...")
 
-			// Check for error messages from aisstream
-			if errStr, ok := msg["error"]; ok {
-				log.Printf("[ais] aisstream error: %v", errStr)
-				continue
+			aisConnMu.Lock()
+			aisConn = c
+			aisConnMu.Unlock()
+
+			// Set keepalive
+			pingTicker := time.NewTicker(30 * time.Second)
+			c.SetPongHandler(func(string) error {
+				return c.SetReadDeadline(time.Now().Add(60 * time.Second))
+			})
+			c.SetReadDeadline(time.Now().Add(60 * time.Second))
+
+			// Batch insert to reduce DB pressure
+			batch := make([]map[string]interface{}, 0, 100)
+			flushBatch := func() {
+				if len(batch) == 0 {
+					return
+				}
+				if err := insertTrafficBatch(context.Background(), batch); err != nil {
+					log.Printf("[ais] batch insert error: %v", err)
+				}
+				batch = batch[:0]
 			}
 
-			batch = append(batch, msg)
-			if len(batch) >= 100 {
-				flushBatch()
+			batchTicker := time.NewTicker(5 * time.Second)
+
+			streamActive := true
+			for streamActive {
+				select {
+				case <-ctx.Done():
+					flushBatch()
+					c.Close()
+					aisConnMu.Lock()
+					aisConn = nil
+					aisConnMu.Unlock()
+					pingTicker.Stop()
+					batchTicker.Stop()
+					log.Println("[ais] connection closed (context done)")
+					return
+				case <-batchTicker.C:
+					flushBatch()
+				case <-pingTicker.C:
+					if err := c.WriteMessage(websocket.PingMessage, nil); err != nil {
+						log.Printf("[ais] ping error: %v", err)
+					}
+				default:
+				}
+
+				_, message, err := c.ReadMessage()
+				if err != nil {
+					flushBatch()
+					log.Printf("[ais] read error: %v", err)
+					c.Close()
+					aisConnMu.Lock()
+					aisConn = nil
+					aisConnMu.Unlock()
+					pingTicker.Stop()
+					batchTicker.Stop()
+					streamActive = false
+					continue
+				}
+
+				var msg map[string]interface{}
+				if err := json.Unmarshal(message, &msg); err != nil {
+					continue
+				}
+
+				// Check for error messages from aisstream
+				if errStr, ok := msg["error"]; ok {
+					log.Printf("[ais] aisstream error: %v", errStr)
+					// If we get an auth error, don't retry
+					if errMsg, ok := errStr.(string); ok && (strings.Contains(errMsg, "Invalid API Key") || strings.Contains(errMsg, "API key")) {
+						log.Printf("[ais] fatal auth error, stopping reconnection")
+						return
+					}
+					continue
+				}
+
+				batch = append(batch, msg)
+				if len(batch) >= 100 {
+					flushBatch()
+				}
 			}
 		}
 	}()
+}
+
+func minDuration(a, b time.Duration) time.Duration {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // insertTrafficBatch inserts a batch of AIS messages into traffic_logs

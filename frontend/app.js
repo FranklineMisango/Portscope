@@ -513,7 +513,6 @@ function App() {
 				maxBounds: [[-180, -80], [180, 85]],
 				maxBoundsViscosity: 1.0,
 			}).setView([viewStateRef.current.center[1], viewStateRef.current.center[0]], viewStateRef.current.zoom);
-			L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
 			L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
 				maxZoom: 19,
 				attribution: '&copy; OpenStreetMap contributors &copy; CARTO',
