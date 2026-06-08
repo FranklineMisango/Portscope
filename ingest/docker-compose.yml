@@ -124,10 +124,18 @@ services:
       - db
       - db-migrate
 
-  # aisstreamer is deprecated — AIS streaming is now handled dynamically
-  # by the API when a port is selected on the frontend.
-  # aisstreamer:
-  #   build: ...
+  aisstreamer:
+    build:
+      context: .
+      dockerfile: Dockerfile.aisstreamer
+    environment:
+      - POSTGRES_DSN=postgres://postgres:postgres@db:5432/postgres?sslmode=disable
+      - AISSTREAM_API_KEY=${AISSTREAM_API_KEY}
+      - AISSTREAM_RADIUS_KM=20
+      - AISSTREAM_REFRESH_INTERVAL=30m
+    depends_on:
+      - db
+      - db-migrate
 
   grafana:
     image: grafana/grafana:9.5.2

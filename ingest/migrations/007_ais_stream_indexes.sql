@@ -2,14 +2,12 @@
 -- The aisstreamer writes high-frequency data, so partial indexes on event_time help
 
 -- Index for ST_DWithin against port geometries (the /traffic endpoint query)
--- This already exists from 002_create_normalized_tables.sql but ensure:
-SELECT 1 FROM pg_indexes WHERE indexname = 'idx_traffic_logs_position' \gset
--- (don't error if missing)
-
+-- This already exists from 002_create_normalized_tables.sql
 -- Create a composite index for the common /traffic query pattern:
 -- WHERE position IS NOT NULL AND ST_DWithin(position, query_geom, radius) AND event_time >= now() - interval
+-- Daily lookup index using event_time directly (date_trunc not immutable in all PG versions)
 CREATE INDEX IF NOT EXISTS idx_traffic_logs_daily_lookup 
-  ON traffic_logs (date_trunc('day', event_time)) 
+  ON traffic_logs (event_time DESC) 
   WHERE position IS NOT NULL;
 
 -- Add index for mmsi + event_time combo to speed up vessel lookups
@@ -22,14 +20,9 @@ CREATE INDEX IF NOT EXISTS idx_traffic_logs_event_time_pos
   ON traffic_logs (event_time DESC) 
   WHERE position IS NOT NULL;
 
--- Geography index for ST_DWithin with meter-based distance queries
--- The /traffic, /live, and /port/{id}/traffic endpoints use ST_DWithin with
--- geography cast to query vessel positions near ports within a meter radius
--- Note: We avoid a functional index on geography(position) since geography()
--- is not immutable. Instead the query uses position::geography at runtime,
--- which will use the existing idx_traffic_logs_position GIST index indirectly.
--- For high-volume setups, consider adding a separate geography column.
-
+-- Note: geography() is not immutable, so we avoid a functional index.
+-- The existing idx_traffic_logs_position GIST index is used indirectly
+-- via position::geography cast at runtime.
 -- Add a table to track which ports have active vessel coverage
 CREATE TABLE IF NOT EXISTS ais_stream_coverage (
   id BIGSERIAL PRIMARY KEY,

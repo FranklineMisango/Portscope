@@ -704,6 +704,255 @@ func main() {
 		w.Write(b)
 	}).Methods("GET")
 
+	// ─── Name-based analytics endpoint (used by frontend with GeoJSON port names) ───
+	r.HandleFunc("/api/analytics", func(w http.ResponseWriter, r *http.Request) {
+		name := r.URL.Query().Get("name")
+		if name == "" {
+			http.Error(w, "missing name query param", http.StatusBadRequest)
+			return
+		}
+		radius := 5000
+		if v := r.URL.Query().Get("radius"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 200000 {
+				radius = n
+			}
+		}
+		mins := 10
+		if v := r.URL.Query().Get("mins"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 1440 {
+				mins = n
+			}
+		}
+		lookbackInterval := fmt.Sprintf("%d minutes", mins)
+
+		// Get port info first
+		var portID int64
+		var portName, portCountry, portISO3 sql.NullString
+		err := db.QueryRow(`SELECT id, name, country, iso3 FROM ports WHERE name=$1`, name).Scan(&portID, &portName, &portCountry, &portISO3)
+		if err != nil {
+			// Try by fullname-like match
+			err = db.QueryRow(`SELECT id, name, country, iso3 FROM ports WHERE $1 LIKE '%' || name || '%' OR name LIKE '%' || $1 || '%'`, name).Scan(&portID, &portName, &portCountry, &portISO3)
+			if err != nil {
+				http.Error(w, fmt.Sprintf("port not found: %v", err), 404)
+				return
+			}
+		}
+
+		// Query live analytics using id
+		q := `
+		SELECT
+			COUNT(*) AS total_msgs,
+			COUNT(DISTINCT mmsi) AS unique_ships,
+			COUNT(*) FILTER (WHERE speed_knots > 1) AS underway,
+			COUNT(*) FILTER (WHERE speed_knots <= 1) AS anchored,
+			COALESCE(AVG(speed_knots), 0) AS avg_speed_knots,
+			MAX(timestamp) AS last_seen
+		FROM ais_positions
+		WHERE port_id = (SELECT name FROM ports WHERE id=$1)
+		  AND timestamp >= now() - $2::interval`
+		var totalMsgs, uniqueShips, underway, anchored int
+		var avgSpeed float64
+		var lastSeen sql.NullTime
+		err = db.QueryRow(q, portID, lookbackInterval).Scan(&totalMsgs, &uniqueShips, &underway, &anchored, &avgSpeed, &lastSeen)
+		if err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+
+			// Recent ships
+		shipsQ := `SELECT DISTINCT ON (mmsi) mmsi, speed_knots, course_over_ground, timestamp,
+			longitude AS lon, latitude AS lat,
+			COALESCE(ship_name, '') AS ship_name,
+			COALESCE(ship_type, '') AS ship_type,
+			COALESCE(destination, '') AS destination,
+			ship_length_m, ship_width_m, draught
+			FROM ais_positions
+			WHERE port_id = (SELECT name FROM ports WHERE id=$1)
+			  AND timestamp >= now() - $2::interval
+			  AND mmsi IS NOT NULL
+			ORDER BY mmsi, timestamp DESC
+			LIMIT 50`
+		type ShipInfo struct {
+			MMSI        int64      `json:"mmsi"`
+			Speed       float64    `json:"speed_knots"`
+			Cog         float64    `json:"cog"`
+			Lat         float64    `json:"lat"`
+			Lon         float64    `json:"lon"`
+			LastSeen    time.Time  `json:"last_seen"`
+			ShipName    string     `json:"ship_name"`
+			ShipType    string     `json:"ship_type"`
+			Destination string    `json:"destination"`
+			LengthM     *float64   `json:"ship_length_m,omitempty"`
+			WidthM      *float64   `json:"ship_width_m,omitempty"`
+			Draught     *float64   `json:"draught,omitempty"`
+		}
+		ships := make([]ShipInfo, 0)
+		sRows, err := db.Query(shipsQ, portID, lookbackInterval)
+		if err == nil {
+			defer sRows.Close()
+			for sRows.Next() {
+				var s ShipInfo
+				var name, stype, dest sql.NullString
+				var length, width, draught sql.NullFloat64
+				var lastSeen sql.NullTime
+				if err := sRows.Scan(&s.MMSI, &s.Speed, &s.Cog, &lastSeen, &s.Lon, &s.Lat, &name, &stype, &dest, &length, &width, &draught); err == nil {
+					if lastSeen.Valid { s.LastSeen = lastSeen.Time }
+					s.ShipName = name.String
+					s.ShipType = stype.String
+					s.Destination = dest.String
+					if length.Valid { s.LengthM = &length.Float64 }
+					if width.Valid { s.WidthM = &width.Float64 }
+					if draught.Valid { s.Draught = &draught.Float64 }
+					ships = append(ships, s)
+				}
+			}
+		}
+
+		resp := map[string]interface{}{
+			"port": map[string]interface{}{
+				"id":      portID,
+				"name":    portName.String,
+				"country": portCountry.String,
+				"iso3":    portISO3.String,
+			},
+			"analytics": map[string]interface{}{
+				"lookback_minutes": mins,
+				"radius_meters":    radius,
+				"last_updated":     lastSeen.Time,
+				"total_messages":   totalMsgs,
+				"unique_ships":     uniqueShips,
+				"underway":         underway,
+				"anchored":         anchored,
+				"avg_speed_knots":  avgSpeed,
+			},
+			"ships": ships,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}).Methods("GET")
+
+	// ─── Port Analytics endpoint (id-based) ───
+	r.HandleFunc("/api/port/{id:[0-9]+}/analytics", func(w http.ResponseWriter, r *http.Request) {
+		vars := mux.Vars(r)
+		idStr := vars["id"]
+		id, _ := strconv.ParseInt(idStr, 10, 64)
+
+		radius := 5000
+		if v := r.URL.Query().Get("radius"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 200000 {
+				radius = n
+			}
+		}
+		mins := 10
+		if v := r.URL.Query().Get("mins"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 1440 {
+				mins = n
+			}
+		}
+		lookbackInterval := fmt.Sprintf("%d minutes", mins)
+
+		// Get port info first
+		var portName, portCountry, portISO3 sql.NullString
+		var portGeom sql.NullString
+		err := db.QueryRow(`SELECT name, country, iso3, ST_AsGeoJSON(geom) FROM ports WHERE id=$1`, id).Scan(&portName, &portCountry, &portISO3, &portGeom)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("port not found: %v", err), 404)
+			return
+		}
+
+		// Query live analytics
+		q := `
+		SELECT
+			COUNT(*) AS total_msgs,
+			COUNT(DISTINCT mmsi) AS unique_ships,
+			COUNT(*) FILTER (WHERE speed_knots > 1) AS underway,
+			COUNT(*) FILTER (WHERE speed_knots <= 1) AS anchored,
+			COALESCE(AVG(speed_knots), 0) AS avg_speed_knots,
+			MAX(timestamp) AS last_seen
+		FROM ais_positions
+		WHERE port_id = (SELECT name FROM ports WHERE id=$1)
+		  AND timestamp >= now() - $2::interval`
+		var totalMsgs, uniqueShips, underway, anchored int
+		var avgSpeed float64
+		var lastSeen sql.NullTime
+		err = db.QueryRow(q, id, lookbackInterval).Scan(&totalMsgs, &uniqueShips, &underway, &anchored, &avgSpeed, &lastSeen)
+		if err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+
+		// Recent ships (last N positions)
+		shipsQ := `SELECT DISTINCT ON (mmsi) mmsi, speed_knots, course_over_ground, timestamp,
+			longitude AS lon, latitude AS lat,
+			COALESCE(ship_name, '') AS ship_name,
+			COALESCE(ship_type, '') AS ship_type,
+			COALESCE(destination, '') AS destination,
+			ship_length_m, ship_width_m, draught
+			FROM ais_positions
+			WHERE port_id = (SELECT name FROM ports WHERE id=$1)
+			  AND timestamp >= now() - $2::interval
+			  AND mmsi IS NOT NULL
+			ORDER BY mmsi, timestamp DESC
+			LIMIT 50`
+		type ShipInfo struct {
+			MMSI        int64     `json:"mmsi"`
+			Speed       float64   `json:"speed_knots"`
+			Cog         float64   `json:"cog"`
+			Lat         float64   `json:"lat"`
+			Lon         float64   `json:"lon"`
+			LastSeen    time.Time `json:"last_seen"`
+			ShipName    string    `json:"ship_name"`
+			ShipType    string    `json:"ship_type"`
+			Destination string    `json:"destination"`
+			LengthM     *float64  `json:"ship_length_m,omitempty"`
+			WidthM      *float64  `json:"ship_width_m,omitempty"`
+			Draught     *float64  `json:"draught,omitempty"`
+		}
+		ships := make([]ShipInfo, 0)
+		sRows, err := db.Query(shipsQ, id, lookbackInterval)
+		if err == nil {
+			defer sRows.Close()
+			for sRows.Next() {
+				var s ShipInfo
+				var name, stype, dest sql.NullString
+				var length, width, draught sql.NullFloat64
+				var lastSeen sql.NullTime
+				if err := sRows.Scan(&s.MMSI, &s.Speed, &s.Cog, &lastSeen, &s.Lon, &s.Lat, &name, &stype, &dest, &length, &width, &draught); err == nil {
+					if lastSeen.Valid { s.LastSeen = lastSeen.Time }
+					s.ShipName = name.String
+					s.ShipType = stype.String
+					s.Destination = dest.String
+					if length.Valid { s.LengthM = &length.Float64 }
+					if width.Valid { s.WidthM = &width.Float64 }
+					if draught.Valid { s.Draught = &draught.Float64 }
+					ships = append(ships, s)
+				}
+			}
+		}
+
+		resp := map[string]interface{}{
+			"port": map[string]interface{}{
+				"id":      id,
+				"name":    portName.String,
+				"country": portCountry.String,
+				"iso3":    portISO3.String,
+			},
+			"analytics": map[string]interface{}{
+				"lookback_minutes": mins,
+				"radius_meters":    radius,
+				"last_updated":     lastSeen.Time,
+				"total_messages":   totalMsgs,
+				"unique_ships":     uniqueShips,
+				"underway":         underway,
+				"anchored":         anchored,
+				"avg_speed_knots":  avgSpeed,
+			},
+			"ships": ships,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}).Methods("GET")
+
 	r.HandleFunc("/ports", func(w http.ResponseWriter, r *http.Request) {
 		rows, err := db.Query(`SELECT id, name, country, iso3, source_date::text, source_payload, ST_AsGeoJSON(geom) FROM ports ORDER BY name`)
 		if err != nil {

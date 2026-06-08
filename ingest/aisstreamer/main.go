@@ -171,7 +171,25 @@ func main() {
 }
 
 func loadPorts(db *sql.DB) ([]PortRecord, error) {
-	rows, err := db.Query(`SELECT name, ST_Y(geom) AS lat, ST_X(geom) AS lon FROM ports WHERE geom IS NOT NULL AND name IS NOT NULL`)
+	// Limit to top ports to keep subscription payload manageable for aisstream.io
+	// Use a reasonable limit (aisstream.io free tier handles ~100 boxes)
+	maxPorts := 30
+	if v := os.Getenv("AISSTREAM_MAX_PORTS"); v != "" {
+		if n, err := fmt.Sscanf(v, "%d", &maxPorts); err == nil && n == 1 {
+			if maxPorts < 1 {
+				maxPorts = 1
+			}
+			if maxPorts > 500 {
+				maxPorts = 500
+			}
+		}
+	}
+	rows, err := db.Query(`
+		SELECT name, ST_Y(geom) AS lat, ST_X(geom) AS lon 
+		FROM ports 
+		WHERE geom IS NOT NULL AND name IS NOT NULL
+		ORDER BY id ASC
+		LIMIT $1`, maxPorts)
 	if err != nil {
 		return nil, err
 	}
@@ -316,9 +334,15 @@ func insertBatch(ctx context.Context, db *sql.DB, messages []AisMessage) error {
 	}
 	defer stmt.Close()
 
+	aisPosStmt, err := tx.PrepareContext(ctx, `INSERT INTO ais_positions (port_id, mmsi, ship_name, ship_type, latitude, longitude, speed_knots, course_over_ground, true_heading, nav_status, rate_of_turn, destination, raw_payload, timestamp)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`)
+	if err != nil {
+		return fmt.Errorf("prepare ais_positions: %w", err)
+	}
+	defer aisPosStmt.Close()
+
 	for _, msg := range messages {
 		// Parse PositionReport from the Message field
-		// The Message field contains a map with key "PositionReport"
 		var msgMap map[string]json.RawMessage
 		if err := json.Unmarshal(msg.Message, &msgMap); err != nil {
 			continue
@@ -333,7 +357,7 @@ func insertBatch(ctx context.Context, db *sql.DB, messages []AisMessage) error {
 			continue
 		}
 
-		// Get metadata for MMSI (sometimes the PositionReport has UserID, sometimes MetaData has MMSI)
+		// Get metadata for MMSI and ship name
 		var meta Metadata
 		mmsi := pr.UserID
 		if msg.MetaData != nil {
@@ -361,11 +385,11 @@ func insertBatch(ctx context.Context, db *sql.DB, messages []AisMessage) error {
 
 		eventTime := time.Now()
 		if pr.Timestamp > 0 && pr.Timestamp <= 60 {
-			// Timestamp is seconds within the minute, use current time rounded
 			now := time.Now().Truncate(time.Minute)
 			eventTime = now.Add(time.Duration(pr.Timestamp) * time.Second)
 		}
 
+		// Insert into traffic_logs
 		_, err = stmt.ExecContext(ctx,
 			mmsi,
 			string(payloadBytes),
@@ -375,7 +399,59 @@ func insertBatch(ctx context.Context, db *sql.DB, messages []AisMessage) error {
 			eventTime,
 		)
 		if err != nil {
-			log.Printf("insert error for mmsi %d: %v", mmsi, err)
+			log.Printf("insert traffic_logs error for mmsi %d: %v", mmsi, err)
+			continue
+		}
+
+		// Find nearest port and insert into ais_positions
+		var portName string
+		err = db.QueryRowContext(ctx, `SELECT name FROM ports WHERE geom IS NOT NULL ORDER BY geom <-> ST_SetSRID(ST_MakePoint($1,$2),4326) LIMIT 1`, lon, lat).Scan(&portName)
+		if err != nil {
+			portName = ""
+		}
+
+		var navStatus string
+		switch pr.NavigationalStatus {
+		case 0:
+			navStatus = "under way using engine"
+		case 1:
+			navStatus = "at anchor"
+		case 2:
+			navStatus = "not under command"
+		case 3:
+			navStatus = "restricted manoeuvrability"
+		case 4:
+			navStatus = "constrained by draught"
+		case 5:
+			navStatus = "moored"
+		case 6:
+			navStatus = "aground"
+		case 7:
+			navStatus = "engaged in fishing"
+		case 8:
+			navStatus = "under way sailing"
+		default:
+			navStatus = ""
+		}
+
+		_, err = aisPosStmt.ExecContext(ctx,
+			portName,            // port_id
+			mmsi,
+			meta.ShipName,
+			"",                       // ship_type (not available from PositionReport)
+			lat,
+			lon,
+			pr.Sog,
+			pr.Cog,
+			pr.TrueHeading,
+			navStatus,
+			pr.RateOfTurn,
+			"",                       // destination (not available from PositionReport)
+			string(payloadBytes),
+			eventTime,
+		)
+		if err != nil {
+			log.Printf("insert ais_positions error for mmsi %d: %v", mmsi, err)
 			continue
 		}
 	}

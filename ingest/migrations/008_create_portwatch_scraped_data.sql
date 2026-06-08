@@ -44,6 +44,9 @@ CREATE INDEX IF NOT EXISTS idx_portwatch_scraped_pages_type
 CREATE INDEX IF NOT EXISTS idx_portwatch_scraped_pages_name
   ON portwatch_scraped_pages (port_name);
 
+-- Helper: Enable trgm extension if not already (must be before gin_trgm_ops index)
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+
 -- 3. Normalized metrics (main query target for sidebar)
 CREATE TABLE IF NOT EXISTS portwatch_normalized_metrics (
   id BIGSERIAL PRIMARY KEY,
@@ -102,9 +105,6 @@ CREATE TABLE IF NOT EXISTS portwatch_timeseries (
 
 CREATE INDEX IF NOT EXISTS idx_portwatch_timeseries_pageid
   ON portwatch_timeseries (pageid, dataset_name, date_label);
-
--- Helper: Enable trgm extension if not already
-CREATE EXTENSION IF NOT EXISTS pg_trgm;
 
 -- Helper: Update updated_at trigger
 CREATE OR REPLACE FUNCTION update_modified_column()

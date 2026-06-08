@@ -16,7 +16,10 @@ function pointFromGeometry(geom) {
 	if (!geom) return null;
 	const parsed = typeof geom === 'string' ? JSON.parse(geom) : geom;
 	if (parsed && parsed.type === 'Point' && Array.isArray(parsed.coordinates) && parsed.coordinates.length >= 2) {
-		return parsed.coordinates;
+		const [lon, lat] = parsed.coordinates;
+		if (Number.isFinite(lon) && Number.isFinite(lat) && lon >= -180 && lon <= 180 && lat >= -90 && lat <= 90) {
+			return parsed.coordinates;
+		}
 	}
 	return null;
 }
@@ -126,6 +129,15 @@ function App() {
 	const [pwData, setPwData] = React.useState(null);
 	const [pwLoading, setPwLoading] = React.useState(false);
 	const [pwError, setPwError] = React.useState(null);
+	const [aisAnalytics, setAisAnalytics] = React.useState(null);
+	const [aisLoading, setAisLoading] = React.useState(false);
+	const aisPrevName = React.useRef(null);
+
+	function resetAIS() {
+		setAisAnalytics(null);
+		setAisLoading(false);
+		aisPrevName.current = null;
+	}
 
 	const mapRef = React.useRef(null);
 	const portLayerRef = React.useRef(null);
@@ -187,10 +199,10 @@ function App() {
 		return null;
 	}
 
-	// Fetch PortWatch data
+	// Fetch PortWatch data (by pageid)
 	React.useEffect(() => {
 		const pageid = selectedItem?.data?.pageid;
-		if (!pageid) {
+		if (!pageid || selectedItem?.type !== 'port') {
 			setPwData(null);
 			setPwLoading(false);
 			setPwError(null);
@@ -200,23 +212,58 @@ function App() {
 		if (pageid === pwPrevPageid.current) return;
 		pwPrevPageid.current = pageid;
 
-		setPwLoading(true);
-		setPwError(null);
-		setPwData(null);
+		if (pageid) {
+			setPwLoading(true);
+			setPwError(null);
+			setPwData(null);
 
 		fetch(apiUrl('/api/portwatch/' + pageid + '/data'))
+				.then(res => {
+					if (!res.ok) throw new Error('API returned ' + res.status);
+					return res.json();
+				})
+				.then(data => {
+					setPwData(data);
+					setPwLoading(false);
+				})
+				.catch(err => {
+					console.error('PortWatch data error:', err);
+					setPwError(err.message);
+					setPwLoading(false);
+				});
+		} else {
+			setPwLoading(false);
+			setPwError('No PortWatch ID available');
+		}
+	}, [selectedItem]);
+
+	// Fetch AIS analytics (by port name from GeoJSON fullname)
+
+	React.useEffect(() => {
+		const portName = selectedItem?.data?.name;
+		if (!portName || selectedItem?.type !== 'port') {
+			resetAIS();
+			return;
+		}
+		if (portName === aisPrevName.current) return;
+		aisPrevName.current = portName;
+
+		setAisLoading(true);
+		setAisAnalytics(null);
+
+		fetch(apiUrl('/api/analytics?name=' + encodeURIComponent(portName) + '&mins=10&radius=5000'))
 			.then(res => {
-				if (!res.ok) throw new Error('API returned ' + res.status);
+				if (!res.ok) throw new Error('Analytics API returned ' + res.status);
 				return res.json();
 			})
 			.then(data => {
-				setPwData(data);
-				setPwLoading(false);
+				setAisAnalytics(data);
+				setAisLoading(false);
 			})
 			.catch(err => {
-				console.error('PortWatch data error:', err);
-				setPwError(err.message);
-				setPwLoading(false);
+				console.error('AIS analytics error:', err);
+				setAisAnalytics(null);
+				setAisLoading(false);
 			});
 	}, [selectedItem]);
 
@@ -504,12 +551,12 @@ function App() {
 			if (!mapEl2 || mapEl2._leaflet_id) return;
 			mapRef.current = L.map('map', {
 				zoomControl: true,
-				worldCopyJump: false,
-				dragging: false,
+				worldCopyJump: true,
+				dragging: true,
 				scrollWheelZoom: true,
 				doubleClickZoom: true,
-				boxZoom: false,
-				keyboard: false,
+				boxZoom: true,
+				keyboard: true,
 				maxBounds: [[-180, -80], [180, 85]],
 				maxBoundsViscosity: 1.0,
 			}).setView([viewStateRef.current.center[1], viewStateRef.current.center[0]], viewStateRef.current.zoom);
@@ -568,6 +615,7 @@ function App() {
 				const allCoords = [];
 				ports.forEach(p => { const c = pointFromGeometry(p.geom); if (c) allCoords.push([c[1], c[0]]); });
 				chokepoints.forEach(p => { const c = pointFromGeometry(p.geom); if (c) allCoords.push([c[1], c[0]]); });
+				if (allCoords.length === 0) return;
 				if (typeof maplibregl !== 'undefined' && mapRef.current && mapRef.current.fitBounds) {
 					// MapLibre expects [[minLon,minLat],[maxLon,maxLat]]
 					const lonlats = allCoords.map(([lat, lon]) => [lon, lat]);
@@ -659,6 +707,52 @@ function App() {
 		return pts.slice(-30).map(p => p.value);
 	}
 
+	// AIS analytics section
+	function AISSection() {
+		if (aisLoading) return e('div', { className: 'ais-section', key: 'ais-loading' },
+			e('div', { className: 'ais-header' }, 'Live AIS Traffic'),
+			e('div', { className: 'pw-loading' }, 'Loading AIS data...')
+		);
+		if (!aisAnalytics) return null;
+		const a = aisAnalytics.analytics || {};
+		const ships = aisAnalytics.ships || [];
+		return e('div', { className: 'ais-section', key: 'ais-data' },
+			e('div', { className: 'ais-header' },
+				e('span', { className: 'title' }, 'Live AIS Traffic'),
+				e('span', { style: { fontSize: '10px', color: 'var(--muted)' } }, a.last_updated ? 'Updated: ' + new Date(a.last_updated).toLocaleTimeString() : '')
+			),
+			e('div', { className: 'pw-stat-grid' },
+				e('div', { className: 'pw-stat' },
+					e('div', { className: 'val' }, String(a.unique_ships || 0)),
+					e('div', { className: 'lbl' }, 'Ships (10 min)')
+				),
+				e('div', { className: 'pw-stat' },
+					e('div', { className: 'val' }, String(a.underway || 0)),
+					e('div', { className: 'lbl' }, 'Underway')
+				),
+				e('div', { className: 'pw-stat' },
+					e('div', { className: 'val' }, String(a.anchored || 0)),
+					e('div', { className: 'lbl' }, 'Anchored')
+				),
+				e('div', { className: 'pw-stat' },
+					e('div', { className: 'val' }, (a.avg_speed_knots || 0).toFixed(1)),
+					e('div', { className: 'lbl' }, 'Avg kts')
+				)
+			),
+			ships.length > 0 ? e('div', { className: 'ais-ships' },
+				e('div', { style: { fontSize: '10px', textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--muted)', marginBottom: '4px', marginTop: '8px' } }, 'Recent ships'),
+				ships.slice(0, 10).map(s =>
+					e('div', { className: 'ais-ship-row', key: s.mmsi },
+						e('span', { className: 'ais-mmsi' }, String(s.mmsi)),
+						e('span', { className: 'ais-name', title: s.ship_name || '' }, s.ship_name && s.ship_name.length > 15 ? s.ship_name.slice(0, 15) + '…' : (s.ship_name || '—')),
+						e('span', { className: 'ais-speed' }, (s.speed_knots || 0).toFixed(1) + ' kts'),
+						e('span', { className: 'ais-cog' }, (s.cog || 0).toFixed(0) + '°')
+					)
+				)
+			) : null
+		);
+	};
+
 	return e('div', { className: 'shell' },
 		e('div', { className: 'topbar' },
 			e('div', { className: 'topbar-meta' },
@@ -695,7 +789,7 @@ function App() {
 					e('div', { className: 'map-card' },
 						e('span', { className: 'eyebrow' }, 'Map view'),
 						e('h3', null, mapMode === 'globe' ? '3D globe mode' : 'Fixed 2D map'),
-						e('p', null, mapMode === 'globe' ? 'Globe mode is optional. Click a point to load details.' : 'Fixed dashboard view. Click a point to load details.'),
+						e('p', null, mapMode === 'globe' ? 'Globe mode is optional. Click a point to load details.' : 'Interactive map with pan, zoom and click. Click a point to load details.'),
 						e('div', { style: { display: 'flex', gap: '8px', marginTop: '10px', flexWrap: 'wrap' } },
 							e('button', {
 								type: 'button',
@@ -727,7 +821,7 @@ function App() {
 				),
 				e('div', { id: 'map' })
 			),
-			// Right sidebar — PortWatch analytics (wider)
+	// Right sidebar — PortWatch + AIS analytics
 			e('div', { className: 'sidebar right-rail', style: { padding: '12px', gap: '10px' } },
 				e('div', { className: 'pw-header' },
 					e('span', { className: 'title' }, selectedItem ? selectedItem.data.name : 'PortWatch'),
@@ -742,12 +836,12 @@ function App() {
 					: pwError
 					? [e('div', { className: 'pw-error', key: 'error' }, 'Could not load PortWatch data. Visit the external link above.')]
 					: pwData && pwData.metrics
-					? [
+					? [ e(AISSection, { key: 'ais-section' }),
 						e('div', { className: 'pw-stat-grid', key: 'stats' },
-							e('div', { className: 'pw-stat' },
-								e('div', { className: 'val' }, formatCount(pwData.metrics.total_portcalls)),
-								e('div', { className: 'lbl' }, 'Port Calls')
-							),
+						  e('div', { className: 'pw-stat' },
+						    e('div', { className: 'val' }, formatCount(pwData.metrics.total_portcalls)),
+						    e('div', { className: 'lbl' }, 'Port Calls')
+						  ),
 							e('div', { className: 'pw-stat' },
 								e('div', { className: 'val' }, formatCount(Math.round(pwData.metrics.avg_daily_portcalls))),
 								e('div', { className: 'lbl' }, 'Avg Daily')
@@ -797,7 +891,7 @@ function App() {
 							)
 							: null
 						]
-					: [e('div', { className: 'pw-empty', key: 'no-data' }, 'No PortWatch data available for this item.')]
+					: [e(AISSection, { key: 'ais-section' }), e('div', { className: 'pw-empty', key: 'no-data' }, 'No PortWatch data available for this item.')]
 				)
 			)
 		)
