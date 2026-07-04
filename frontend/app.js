@@ -116,8 +116,6 @@
 			try { return window.localStorage.getItem('portscope-map-mode') || 'globe'; } catch (e) { return 'globe'; }
 		});
 		const [status, setStatus] = React.useState('Connecting to Portscope...');
-		const [monitorQuery, setMonitorQuery] = React.useState('');
-		const [monitorPortId, setMonitorPortId] = React.useState('');
 		const [monitorActive, setMonitorActive] = React.useState(false);
 		const [monitorStatus, setMonitorStatus] = React.useState('Not monitoring');
 		const [pwData, setPwData] = React.useState(null);
@@ -134,6 +132,22 @@
 		const mapContainerRef = React.useRef(null);
 		const mapReadyRef = React.useRef(false);
 
+		function sendWsMessage(message) {
+			try {
+				if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+					wsRef.current.send(JSON.stringify(message));
+				}
+			} catch (e) {}
+		}
+
+		function selectPort(port) {
+			if (!port) return;
+			setSelectedItem({ type: 'port', data: port });
+			setMonitorStatus(`Ready to monitor ${port.name}`);
+			setStatus(`Selected ${port.name}`);
+			sendWsMessage({ type: 'select', kind: 'port', id: port.id, name: port.name });
+		}
+
 		function stopLiveMonitor() {
 			setMonitorActive(false);
 			setMonitorStatus('Live monitoring stopped');
@@ -142,11 +156,7 @@
 				clearInterval(analyticsTimerRef.current);
 				analyticsTimerRef.current = null;
 			}
-			try {
-				if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-					wsRef.current.send(JSON.stringify({ type: 'stop' }));
-				}
-			} catch (e) {}
+			sendWsMessage({ type: 'stop' });
 		}
 
 		function loadAisAnalytics(portName) {
@@ -172,17 +182,12 @@
 
 		function openPortMonitor(port) {
 			if (!port) return;
-			setSelectedItem({ type: 'port', data: port });
-			setMonitorPortId(String(port.id));
+			selectPort(port);
 			setMonitorActive(true);
 			setMonitorStatus(`Monitoring ${port.name}`);
 			setStatus(`Monitoring live AIS for ${port.name}`);
 			setAisLoading(true);
-			try {
-				if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-					wsRef.current.send(JSON.stringify({ type: 'monitor', kind: 'port', id: port.id, name: port.name }));
-				}
-			} catch (e) {}
+			sendWsMessage({ type: 'monitor', kind: 'port', id: port.id, name: port.name });
 			loadAisAnalytics(port.name);
 			if (analyticsTimerRef.current) clearInterval(analyticsTimerRef.current);
 			analyticsTimerRef.current = setInterval(() => loadAisAnalytics(port.name), 5000);
@@ -201,9 +206,6 @@
 							setPorts(normalizeFeatureCollection({ features: (msg.ports || []).map(item => ({ properties: item.source_value || {}, geometry: item.geom })) }, 'port'));
 							setChokepoints(normalizeFeatureCollection({ features: (msg.chokepoints || []).map(item => ({ properties: item.source_value || {}, geometry: item.geom })) }, 'chokepoint'));
 							setStatus(`Loaded ${msg.ports?.length || 0} ports and ${msg.chokepoints?.length || 0} chokepoints.`);
-							if (!monitorPortId && msg.ports && msg.ports.length > 0) {
-								setMonitorPortId(String(msg.ports[0].id));
-							}
 						}
 						if (msg.type === 'selected_record' && msg.kind === 'port' && msg.data) {
 							setSelectedItem({ type: 'port', data: msg.data });
@@ -329,10 +331,7 @@
 					const feature = event.features && event.features[0];
 					if (!feature) return;
 					const record = ports.find(item => String(item.id) === String(feature.properties.id) || String(item.name).toLowerCase() === String(feature.properties.name || '').toLowerCase());
-					if (record) {
-						setSelectedItem({ type: 'port', data: record });
-						setMonitorPortId(String(record.id));
-					}
+					if (record) selectPort(record);
 				});
 				mapRef.current.on('click', 'chokepoints-layer', (event) => {
 					const feature = event.features && event.features[0];
@@ -416,8 +415,9 @@
 
 		React.useEffect(() => {
 			const portName = selectedItem?.type === 'port' ? selectedItem.data?.name : null;
-			if (!portName || !monitorActive) return;
+			if (!portName) return;
 			loadAisAnalytics(portName);
+			if (!monitorActive) return;
 			if (analyticsTimerRef.current) clearInterval(analyticsTimerRef.current);
 			analyticsTimerRef.current = setInterval(() => loadAisAnalytics(portName), 5000);
 			return () => {
@@ -446,23 +446,6 @@
 					setPwLoading(false);
 				});
 		}, [selectedItem]);
-
-		const monitorMatches = React.useMemo(() => {
-			const query = monitorQuery.trim().toLowerCase();
-			const items = query
-				? ports.filter(port => {
-					const name = String(port.name || '').toLowerCase();
-					const country = String(port.country || '').toLowerCase();
-					return name.includes(query) || country.includes(query) || String(port.id).includes(query);
-				})
-				: ports;
-			return items.slice(0, 20);
-		}, [ports, monitorQuery]);
-
-		const monitorSelectedPort = React.useMemo(() => {
-			if (!monitorPortId) return null;
-			return ports.find(port => String(port.id) === String(monitorPortId)) || null;
-		}, [ports, monitorPortId]);
 
 		const selectedData = selectedItem ? selectedItem.data : null;
 		const selectedDate = selectedData ? selectedData.observed_on : null;
@@ -532,22 +515,7 @@
 						e('div', { className: 'panel-body' },
 							e('div', { className: 'panel-title' }, 'Selected record'),
 							e('div', { className: 'summary-name' }, selectedData ? selectedData.name : 'Choose a record'),
-							e('div', { className: 'chip', style: { marginTop: '10px' } }, selectedDate ? formatTime(selectedDate) : 'Waiting for selection')
-						)
-					),
-					e('section', { className: 'panel section-surface' },
-						e('div', { className: 'panel-header' }, e('div', { className: 'panel-title' }, 'Live AIS Monitor'), e('span', { className: 'chip' }, monitorActive ? 'Running' : 'Idle')),
-						e('div', { className: 'panel-body', style: { display: 'grid', gap: '10px' } },
-							e('div', { className: 'empty-state', style: { padding: '10px 12px' } }, monitorStatus),
-							e('input', { value: monitorQuery, onChange: ev => setMonitorQuery(ev.target.value), placeholder: 'Search ports by name or country', style: { width: '100%', padding: '10px 12px', borderRadius: '12px', border: '1px solid var(--border)', background: 'rgba(255,255,255,0.04)', color: 'var(--text)' } }),
-							e('select', { value: monitorPortId, onChange: ev => setMonitorPortId(ev.target.value), size: 8, style: { width: '100%', padding: '10px', borderRadius: '14px', border: '1px solid var(--border)', background: 'rgba(255,255,255,0.04)', color: 'var(--text)' } },
-								monitorMatches.map(port => e('option', { key: port.id, value: String(port.id) }, formatPortLabel(port)))
-							),
-							e('div', { style: { display: 'flex', gap: '8px', flexWrap: 'wrap' } },
-								e('button', { type: 'button', onClick: () => openPortMonitor(monitorSelectedPort || (selectedItem && selectedItem.type === 'port' ? selectedItem.data : null)), disabled: !(monitorSelectedPort || (selectedItem && selectedItem.type === 'port')), style: { padding: '8px 12px', borderRadius: '999px', border: '1px solid var(--border)', background: 'rgba(118, 228, 181, 0.14)', color: 'var(--text)', cursor: 'pointer' } }, 'Start live'),
-								e('button', { type: 'button', onClick: stopLiveMonitor, disabled: !monitorActive, style: { padding: '8px 12px', borderRadius: '999px', border: '1px solid var(--border)', background: 'rgba(255,255,255,0.04)', color: 'var(--text)', cursor: 'pointer' } }, 'Stop')
-							),
-							e('div', { className: 'hint' }, 'Choose a port, then start live monitoring to stream AIS updates until you stop it.')
+							e('div', { className: 'chip', style: { marginTop: '10px' } }, selectedDate ? formatTime(selectedDate) : 'Click a port on the map')
 						)
 					),
 					e('section', { className: 'panel section-surface' },
@@ -578,9 +546,26 @@
 				),
 				e('div', { className: 'sidebar right-rail', style: { padding: '12px', gap: '10px' } },
 					e('div', { className: 'pw-header' },
-						e('span', { className: 'title' }, selectedItem ? selectedItem.data.name : 'PortWatch'),
+						e('span', { className: 'title' }, selectedItem && selectedItem.type === 'port' ? selectedItem.data.name : 'AIS Monitor'),
 						selectedItem?.data?.pageid ? e('a', { className: 'ext-link', href: apiUrl('/portwatch/' + selectedItem.data.pageid), target: '_blank' }, 'Open on PortWatch →') : null
 					),
+						selectedItem && selectedItem.type === 'port'
+							? e('div', { className: 'panel', style: { marginBottom: '2px' } },
+								e('div', { className: 'panel-body', style: { display: 'grid', gap: '10px' } },
+									e('div', { className: 'empty-state', style: { padding: '10px 12px' } }, monitorStatus),
+									e('div', { style: { display: 'grid', gap: '8px' } },
+										e('div', { className: 'chip' }, 'Selected port: ' + selectedItem.data.name),
+										e('div', { className: 'hint' }, 'Click a port to load its profile. Use live AIS only when you want the stream.')
+									),
+									e('div', { style: { display: 'flex', gap: '8px', flexWrap: 'wrap' } },
+										e('button', { type: 'button', onClick: () => openPortMonitor(selectedItem.data), disabled: !selectedItem || selectedItem.type !== 'port', style: { padding: '8px 12px', borderRadius: '999px', border: '1px solid var(--border)', background: 'rgba(118, 228, 181, 0.14)', color: 'var(--text)', cursor: 'pointer' } }, monitorActive ? 'Restart live' : 'Start live'),
+										e('button', { type: 'button', onClick: stopLiveMonitor, disabled: !monitorActive, style: { padding: '8px 12px', borderRadius: '999px', border: '1px solid var(--border)', background: 'rgba(255,255,255,0.04)', color: 'var(--text)', cursor: 'pointer' } }, 'Stop')
+									)
+								)
+							)
+							: e('div', { className: 'pw-empty' }, 'Click a port to load AIS preview and monitoring controls.')
+						,
+						selectedItem && selectedItem.type === 'port' ? e(AISSection) : null,
 					!selectedItem
 						? e('div', { className: 'pw-empty' }, 'Click a port or chokepoint to view analytics.')
 						: pwLoading
@@ -588,8 +573,7 @@
 						: pwError
 						? e('div', { className: 'pw-error' }, 'Could not load PortWatch data. Visit the external link above.')
 						: pwData && pwData.metrics
-						? e(React.Fragment, null,
-							e(AISSection),
+							? e(React.Fragment, null,
 							e('div', { className: 'pw-stat-grid' },
 								e('div', { className: 'pw-stat' }, e('div', { className: 'val' }, formatCount(pwData.metrics.total_portcalls)), e('div', { className: 'lbl' }, 'Port Calls')),
 								e('div', { className: 'pw-stat' }, e('div', { className: 'val' }, formatCount(Math.round(pwData.metrics.avg_daily_portcalls))), e('div', { className: 'lbl' }, 'Avg Daily')),

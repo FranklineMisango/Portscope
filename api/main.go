@@ -1126,30 +1126,28 @@ func main() {
 			}
 
 			if incoming.Kind == "port" {
+				var selectedRecord *DatasetEntry
 				if incoming.Name != "" {
 					if record, err := loadPortRecordByName(db, incoming.Name); err == nil {
+						selectedRecord = &record
 						if payload, err := json.Marshal(wsMessage{Type: "selected_record", Kind: "port", ID: record.ID, Name: record.Name, Data: mustJSON(record)}); err == nil {
 							_ = conn.WriteMessage(websocket.TextMessage, payload)
 						}
 					}
 				} else if record, err := loadPortRecordByID(db, incoming.ID); err == nil {
+					selectedRecord = &record
 					if payload, err := json.Marshal(wsMessage{Type: "selected_record", Kind: "port", ID: record.ID, Data: mustJSON(record)}); err == nil {
 						_ = conn.WriteMessage(websocket.TextMessage, payload)
 					}
 				}
 
-				// ——— Update AIS subscription for this port ———
-				if aisAPIKey != "" {
-					portName := incoming.Name
-					if portName == "" {
-						portName = "unknown"
-					}
-					lat, lon, err := loadPortCoordsByName(db, portName)
+				if incoming.Type == "monitor" && aisAPIKey != "" && selectedRecord != nil {
+					lat, lon, err := loadPortCoordsByName(db, selectedRecord.Name)
 					if err == nil {
-						log.Printf("[ais] updating subscription to port: %s (%.4f, %.4f)", portName, lat, lon)
+						log.Printf("[ais] updating subscription to port: %s (%.4f, %.4f)", selectedRecord.Name, lat, lon)
 						go updateAISSubscription(aisAPIKey, lat, lon)
 					} else {
-						log.Printf("[ais] could not load coords for port '%s': %v", portName, err)
+						log.Printf("[ais] could not load coords for port '%s': %v", selectedRecord.Name, err)
 					}
 				}
 			}
