@@ -131,6 +131,8 @@
 		const mapRef = React.useRef(null);
 		const mapContainerRef = React.useRef(null);
 		const mapReadyRef = React.useRef(false);
+		const portsRef = React.useRef([]);
+		const chokepointsRef = React.useRef([]);
 
 		function sendWsMessage(message) {
 			try {
@@ -224,6 +226,14 @@
 				try { if (wsRef.current) wsRef.current.close(); } catch (e) {}
 			};
 		}, []);
+
+		React.useEffect(() => {
+			portsRef.current = ports;
+		}, [ports]);
+
+		React.useEffect(() => {
+			chokepointsRef.current = chokepoints;
+		}, [chokepoints]);
 
 		React.useEffect(() => {
 			if (!window.maplibregl || !mapContainerRef.current || mapRef.current) return;
@@ -329,14 +339,23 @@
 
 				mapRef.current.on('click', 'ports-layer', (event) => {
 					const feature = event.features && event.features[0];
-					if (!feature) return;
-					const record = ports.find(item => String(item.id) === String(feature.properties.id) || String(item.name).toLowerCase() === String(feature.properties.name || '').toLowerCase());
+					const fallback = !feature && mapRef.current ? mapRef.current.queryRenderedFeatures(event.point, { layers: ['ports-layer'] })[0] : null;
+					const picked = feature || fallback;
+					if (!picked) return;
+					const record = portsRef.current.find(item => String(item.id) === String(picked.properties.id) || String(item.name).toLowerCase() === String(picked.properties.name || '').toLowerCase());
+					if (record) selectPort(record);
+				});
+				mapRef.current.on('click', (event) => {
+					if (!mapRef.current) return;
+					const picked = mapRef.current.queryRenderedFeatures(event.point, { layers: ['ports-layer'] })[0];
+					if (!picked) return;
+					const record = portsRef.current.find(item => String(item.id) === String(picked.properties.id) || String(item.name).toLowerCase() === String(picked.properties.name || '').toLowerCase());
 					if (record) selectPort(record);
 				});
 				mapRef.current.on('click', 'chokepoints-layer', (event) => {
 					const feature = event.features && event.features[0];
 					if (!feature) return;
-					const record = chokepoints.find(item => String(item.id) === String(feature.properties.id) || String(item.name).toLowerCase() === String(feature.properties.name || '').toLowerCase());
+					const record = chokepointsRef.current.find(item => String(item.id) === String(feature.properties.id) || String(item.name).toLowerCase() === String(feature.properties.name || '').toLowerCase());
 					if (record) setSelectedItem({ type: 'chokepoint', data: record });
 				});
 				mapRef.current.on('mouseenter', 'ports-layer', () => { mapRef.current.getCanvas().style.cursor = 'pointer'; });

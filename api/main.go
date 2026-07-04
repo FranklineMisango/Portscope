@@ -738,39 +738,54 @@ func main() {
 			}
 		}
 
-		// Query live analytics using id
+		// Query live analytics from the stream-backed traffic log.
 		q := `
+		WITH port_geom AS (
+			SELECT geom FROM ports WHERE id = $1
+		)
 		SELECT
 			COUNT(*) AS total_msgs,
 			COUNT(DISTINCT mmsi) AS unique_ships,
-			COUNT(*) FILTER (WHERE speed_knots > 1) AS underway,
-			COUNT(*) FILTER (WHERE speed_knots <= 1) AS anchored,
-			COALESCE(AVG(speed_knots), 0) AS avg_speed_knots,
-			MAX(timestamp) AS last_seen
-		FROM ais_positions
-		WHERE port_id = (SELECT name FROM ports WHERE id=$1)
-		  AND timestamp >= now() - $2::interval`
+			COUNT(*) FILTER (WHERE COALESCE(speed_kts, 0) > 1) AS underway,
+			COUNT(*) FILTER (WHERE COALESCE(speed_kts, 0) <= 1) AS anchored,
+			COALESCE(AVG(speed_kts), 0) AS avg_speed_knots,
+			MAX(event_time) AS last_seen
+		FROM traffic_logs, port_geom
+		WHERE position IS NOT NULL
+		  AND ST_DWithin(position::geography, port_geom.geom::geography, $2)
+		  AND event_time >= now() - $3::interval`
 		var totalMsgs, uniqueShips, underway, anchored int
 		var avgSpeed float64
 		var lastSeen sql.NullTime
-		err = db.QueryRow(q, portID, lookbackInterval).Scan(&totalMsgs, &uniqueShips, &underway, &anchored, &avgSpeed, &lastSeen)
+		err = db.QueryRow(q, portID, float64(radius), lookbackInterval).Scan(&totalMsgs, &uniqueShips, &underway, &anchored, &avgSpeed, &lastSeen)
 		if err != nil {
 			http.Error(w, err.Error(), 500)
 			return
 		}
 
 		// Recent ships
-		shipsQ := `SELECT DISTINCT ON (mmsi) mmsi, speed_knots, course_over_ground, timestamp,
-			longitude AS lon, latitude AS lat,
-			COALESCE(ship_name, '') AS ship_name,
-			COALESCE(ship_type, '') AS ship_type,
-			COALESCE(destination, '') AS destination,
-			ship_length_m, ship_width_m, draught
-			FROM ais_positions
-			WHERE port_id = (SELECT name FROM ports WHERE id=$1)
-			  AND timestamp >= now() - $2::interval
+		shipsQ := `WITH port_geom AS (
+			SELECT geom FROM ports WHERE id = $1
+		)
+		SELECT DISTINCT ON (mmsi)
+			mmsi,
+			COALESCE(speed_kts, 0) AS speed_knots,
+			COALESCE(course_deg, 0) AS course_over_ground,
+			event_time,
+			ST_X(position) AS lon,
+			ST_Y(position) AS lat,
+			COALESCE(payload->'Message'->'PositionReport'->>'ShipName', payload->'MetaData'->>'ShipName', '') AS ship_name,
+			COALESCE(payload->'Message'->'PositionReport'->>'ShipType', payload->'MetaData'->>'ShipType', '') AS ship_type,
+			COALESCE(payload->'Message'->'PositionReport'->>'Destination', payload->'MetaData'->>'Destination', '') AS destination,
+			null::double precision AS ship_length_m,
+			null::double precision AS ship_width_m,
+			null::double precision AS draught
+			FROM traffic_logs, port_geom
+			WHERE position IS NOT NULL
+			  AND ST_DWithin(position::geography, port_geom.geom::geography, $2)
+			  AND event_time >= now() - $3::interval
 			  AND mmsi IS NOT NULL
-			ORDER BY mmsi, timestamp DESC
+			ORDER BY mmsi, event_time DESC
 			LIMIT 50`
 		type ShipInfo struct {
 			MMSI        int64     `json:"mmsi"`
@@ -787,7 +802,7 @@ func main() {
 			Draught     *float64  `json:"draught,omitempty"`
 		}
 		ships := make([]ShipInfo, 0)
-		sRows, err := db.Query(shipsQ, portID, lookbackInterval)
+		sRows, err := db.Query(shipsQ, portID, float64(radius), lookbackInterval)
 		if err == nil {
 			defer sRows.Close()
 			for sRows.Next() {
@@ -868,39 +883,54 @@ func main() {
 			return
 		}
 
-		// Query live analytics
+		// Query live analytics from the stream-backed traffic log.
 		q := `
+		WITH port_geom AS (
+			SELECT geom FROM ports WHERE id = $1
+		)
 		SELECT
 			COUNT(*) AS total_msgs,
 			COUNT(DISTINCT mmsi) AS unique_ships,
-			COUNT(*) FILTER (WHERE speed_knots > 1) AS underway,
-			COUNT(*) FILTER (WHERE speed_knots <= 1) AS anchored,
-			COALESCE(AVG(speed_knots), 0) AS avg_speed_knots,
-			MAX(timestamp) AS last_seen
-		FROM ais_positions
-		WHERE port_id = (SELECT name FROM ports WHERE id=$1)
-		  AND timestamp >= now() - $2::interval`
+			COUNT(*) FILTER (WHERE COALESCE(speed_kts, 0) > 1) AS underway,
+			COUNT(*) FILTER (WHERE COALESCE(speed_kts, 0) <= 1) AS anchored,
+			COALESCE(AVG(speed_kts), 0) AS avg_speed_knots,
+			MAX(event_time) AS last_seen
+		FROM traffic_logs, port_geom
+		WHERE position IS NOT NULL
+		  AND ST_DWithin(position::geography, port_geom.geom::geography, $2)
+		  AND event_time >= now() - $3::interval`
 		var totalMsgs, uniqueShips, underway, anchored int
 		var avgSpeed float64
 		var lastSeen sql.NullTime
-		err = db.QueryRow(q, id, lookbackInterval).Scan(&totalMsgs, &uniqueShips, &underway, &anchored, &avgSpeed, &lastSeen)
+		err = db.QueryRow(q, id, float64(radius), lookbackInterval).Scan(&totalMsgs, &uniqueShips, &underway, &anchored, &avgSpeed, &lastSeen)
 		if err != nil {
 			http.Error(w, err.Error(), 500)
 			return
 		}
 
 		// Recent ships (last N positions)
-		shipsQ := `SELECT DISTINCT ON (mmsi) mmsi, speed_knots, course_over_ground, timestamp,
-			longitude AS lon, latitude AS lat,
-			COALESCE(ship_name, '') AS ship_name,
-			COALESCE(ship_type, '') AS ship_type,
-			COALESCE(destination, '') AS destination,
-			ship_length_m, ship_width_m, draught
-			FROM ais_positions
-			WHERE port_id = (SELECT name FROM ports WHERE id=$1)
-			  AND timestamp >= now() - $2::interval
+		shipsQ := `WITH port_geom AS (
+			SELECT geom FROM ports WHERE id = $1
+		)
+		SELECT DISTINCT ON (mmsi)
+			mmsi,
+			COALESCE(speed_kts, 0) AS speed_knots,
+			COALESCE(course_deg, 0) AS course_over_ground,
+			event_time,
+			ST_X(position) AS lon,
+			ST_Y(position) AS lat,
+			COALESCE(payload->'Message'->'PositionReport'->>'ShipName', payload->'MetaData'->>'ShipName', '') AS ship_name,
+			COALESCE(payload->'Message'->'PositionReport'->>'ShipType', payload->'MetaData'->>'ShipType', '') AS ship_type,
+			COALESCE(payload->'Message'->'PositionReport'->>'Destination', payload->'MetaData'->>'Destination', '') AS destination,
+			null::double precision AS ship_length_m,
+			null::double precision AS ship_width_m,
+			null::double precision AS draught
+			FROM traffic_logs, port_geom
+			WHERE position IS NOT NULL
+			  AND ST_DWithin(position::geography, port_geom.geom::geography, $2)
+			  AND event_time >= now() - $3::interval
 			  AND mmsi IS NOT NULL
-			ORDER BY mmsi, timestamp DESC
+			ORDER BY mmsi, event_time DESC
 			LIMIT 50`
 		type ShipInfo struct {
 			MMSI        int64     `json:"mmsi"`
@@ -917,7 +947,7 @@ func main() {
 			Draught     *float64  `json:"draught,omitempty"`
 		}
 		ships := make([]ShipInfo, 0)
-		sRows, err := db.Query(shipsQ, id, lookbackInterval)
+		sRows, err := db.Query(shipsQ, id, float64(radius), lookbackInterval)
 		if err == nil {
 			defer sRows.Close()
 			for sRows.Next() {
@@ -1321,6 +1351,7 @@ func mustJSON(v interface{}) json.RawMessage {
 
 // simple token-bucket rate limiter per key
 type rateLimiter struct {
+	mu         sync.Mutex
 	ratePerMin int
 	tokens     map[string]float64
 	last       map[string]time.Time
@@ -1331,6 +1362,9 @@ func newRateLimiter(ratePerMin int) *rateLimiter {
 }
 
 func (r *rateLimiter) Allow(key string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	now := time.Now()
 	tokens := r.tokens[key]
 	last := r.last[key]
