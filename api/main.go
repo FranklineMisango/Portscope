@@ -95,7 +95,7 @@ func tileYToLat(y, z int) float64 {
 
 func lonLatToMerc(lon, lat float64) (x, y float64) {
 	x = lon * 20037508.34 / 180.0
-	y = math.Log(math.Tan((90.0+lat)*math.Pi/360.0)) / (math.Pi/180.0)
+	y = math.Log(math.Tan((90.0+lat)*math.Pi/360.0)) / (math.Pi / 180.0)
 	y = y * 20037508.34 / 180.0
 	return
 }
@@ -759,7 +759,7 @@ func main() {
 			return
 		}
 
-			// Recent ships
+		// Recent ships
 		shipsQ := `SELECT DISTINCT ON (mmsi) mmsi, speed_knots, course_over_ground, timestamp,
 			longitude AS lon, latitude AS lat,
 			COALESCE(ship_name, '') AS ship_name,
@@ -773,18 +773,18 @@ func main() {
 			ORDER BY mmsi, timestamp DESC
 			LIMIT 50`
 		type ShipInfo struct {
-			MMSI        int64      `json:"mmsi"`
-			Speed       float64    `json:"speed_knots"`
-			Cog         float64    `json:"cog"`
-			Lat         float64    `json:"lat"`
-			Lon         float64    `json:"lon"`
-			LastSeen    time.Time  `json:"last_seen"`
-			ShipName    string     `json:"ship_name"`
-			ShipType    string     `json:"ship_type"`
+			MMSI        int64     `json:"mmsi"`
+			Speed       float64   `json:"speed_knots"`
+			Cog         float64   `json:"cog"`
+			Lat         float64   `json:"lat"`
+			Lon         float64   `json:"lon"`
+			LastSeen    time.Time `json:"last_seen"`
+			ShipName    string    `json:"ship_name"`
+			ShipType    string    `json:"ship_type"`
 			Destination string    `json:"destination"`
-			LengthM     *float64   `json:"ship_length_m,omitempty"`
-			WidthM      *float64   `json:"ship_width_m,omitempty"`
-			Draught     *float64   `json:"draught,omitempty"`
+			LengthM     *float64  `json:"ship_length_m,omitempty"`
+			WidthM      *float64  `json:"ship_width_m,omitempty"`
+			Draught     *float64  `json:"draught,omitempty"`
 		}
 		ships := make([]ShipInfo, 0)
 		sRows, err := db.Query(shipsQ, portID, lookbackInterval)
@@ -796,13 +796,21 @@ func main() {
 				var length, width, draught sql.NullFloat64
 				var lastSeen sql.NullTime
 				if err := sRows.Scan(&s.MMSI, &s.Speed, &s.Cog, &lastSeen, &s.Lon, &s.Lat, &name, &stype, &dest, &length, &width, &draught); err == nil {
-					if lastSeen.Valid { s.LastSeen = lastSeen.Time }
+					if lastSeen.Valid {
+						s.LastSeen = lastSeen.Time
+					}
 					s.ShipName = name.String
 					s.ShipType = stype.String
 					s.Destination = dest.String
-					if length.Valid { s.LengthM = &length.Float64 }
-					if width.Valid { s.WidthM = &width.Float64 }
-					if draught.Valid { s.Draught = &draught.Float64 }
+					if length.Valid {
+						s.LengthM = &length.Float64
+					}
+					if width.Valid {
+						s.WidthM = &width.Float64
+					}
+					if draught.Valid {
+						s.Draught = &draught.Float64
+					}
 					ships = append(ships, s)
 				}
 			}
@@ -918,13 +926,21 @@ func main() {
 				var length, width, draught sql.NullFloat64
 				var lastSeen sql.NullTime
 				if err := sRows.Scan(&s.MMSI, &s.Speed, &s.Cog, &lastSeen, &s.Lon, &s.Lat, &name, &stype, &dest, &length, &width, &draught); err == nil {
-					if lastSeen.Valid { s.LastSeen = lastSeen.Time }
+					if lastSeen.Valid {
+						s.LastSeen = lastSeen.Time
+					}
 					s.ShipName = name.String
 					s.ShipType = stype.String
 					s.Destination = dest.String
-					if length.Valid { s.LengthM = &length.Float64 }
-					if width.Valid { s.WidthM = &width.Float64 }
-					if draught.Valid { s.Draught = &draught.Float64 }
+					if length.Valid {
+						s.LengthM = &length.Float64
+					}
+					if width.Valid {
+						s.WidthM = &width.Float64
+					}
+					if draught.Valid {
+						s.Draught = &draught.Float64
+					}
 					ships = append(ships, s)
 				}
 			}
@@ -1096,7 +1112,16 @@ func main() {
 			if err := json.Unmarshal(msg, &incoming); err != nil {
 				continue
 			}
-			if incoming.Type != "select" || (incoming.ID == 0 && incoming.Name == "") {
+			if incoming.Type != "select" && incoming.Type != "monitor" {
+				if incoming.Type == "stop" || incoming.Type == "clear" {
+					if aisAPIKey != "" {
+						log.Println("[ais] stopping live subscription")
+						go updateAISSubscription(aisAPIKey, 0, 0)
+					}
+				}
+				continue
+			}
+			if incoming.ID == 0 && incoming.Name == "" {
 				continue
 			}
 
