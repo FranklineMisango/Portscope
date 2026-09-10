@@ -379,35 +379,135 @@ func getDefaultUnavailableData(pageID string) []UnavailableDataItem {
 	}
 }
 
-// ──── Fetch & Normalize PortWatch Data from ArcGIS ────
+// ──── Fetch PortWatch Data from Local DB (with ArcGIS fallback) ────
 
 func fetchPortWatchData(db *sql.DB, pageID string) (*PortWatchPageResult, error) {
-	client := getPortWatchClient()
-
 	// 1. Lookup the port from DB
 	result, err := lookupPortByPageID(db, pageID)
 	if err != nil {
 		return nil, fmt.Errorf("lookup failed: %w", err)
 	}
 
-	// If we couldn't find the port, return what we have
+	// 2. Try local time-series data first (from ingest pipeline)
+	if data, ok := fetchPortWatchFromLocalDB(db, pageID, result); ok {
+		return data, nil
+	}
+
+	// 3. Fallback: ArcGIS Feature Service (old path, for backwards compatibility)
+	//    Remove once ingest pipeline is fully populating portwatch_timeseries.
+	return fetchPortWatchFromArcGIS(result)
+}
+
+// fetchPortWatchFromLocalDB reads normalized metrics + timeseries from the local DB.
+// Returns (result, true) on success, or (nil, false) if no local data exists.
+func fetchPortWatchFromLocalDB(db *sql.DB, pageID string, result *PortWatchPageResult) (*PortWatchPageResult, bool) {
+	// Try portwatch_normalized_metrics first
+	var totalPC int
+	var totalImport, totalExport float64
+	var dateMin, dateMax string
+	var tsData json.RawMessage
+
+	err := db.QueryRow(`
+		SELECT COALESCE(aggregates->>'total_portcalls', '0')::int,
+		       COALESCE(aggregates->>'total_imports', '0')::numeric,
+		       COALESCE(aggregates->>'total_exports', '0')::numeric,
+		       COALESCE(aggregates->>'data_range_start', ''),
+		       COALESCE(aggregates->>'data_range_end', ''),
+		       timeseries_data
+		FROM portwatch_normalized_metrics
+		WHERE pageid = $1
+	`, pageID).Scan(&totalPC, &totalImport, &totalExport, &dateMin, &dateMax, &tsData)
+
+	if err != nil {
+		// No local data yet
+		return nil, false
+	}
+
+	metrics := &PortWatchMetrics{
+		TotalPortcalls: totalPC,
+		TotalImports:   totalImport,
+		TotalExports:   totalExport,
+		DataRangeStart: dateMin,
+		DataRangeEnd:   dateMax,
+	}
+	if totalPC > 0 && dateMin != "" && dateMax != "" {
+		// Compute daily average from actual date range
+		if start, err1 := time.Parse("2006-01-02", dateMin); err1 == nil {
+			if end, err2 := time.Parse("2006-01-02", dateMax); err2 == nil {
+				days := end.Sub(start).Hours()/24.0 + 1
+				if days > 0 {
+					metrics.AvgDailyPortcalls = roundTo1(float64(totalPC) / days)
+				}
+			}
+		}
+	}
+
+	// Parse time-series data from JSONB
+	ts := &PortWatchTimeSeries{}
+	if tsData != nil {
+		var parsed struct {
+			Portcalls []TimeSeriesPoint `json:"portcalls,omitempty"`
+			Imports   []TimeSeriesPoint `json:"imports,omitempty"`
+			Exports   []TimeSeriesPoint `json:"exports,omitempty"`
+		}
+		if json.Unmarshal(tsData, &parsed) == nil {
+			ts.Portcalls = parsed.Portcalls
+			ts.Imports = parsed.Imports
+			ts.Exports = parsed.Exports
+		}
+	}
+
+	// Also try portwatch_timeseries for chart data if ts is empty
+	if len(ts.Portcalls) == 0 {
+		rows, err := db.Query(`
+			SELECT dataset_name, date_label, value
+			FROM portwatch_timeseries
+			WHERE pageid = $1
+			ORDER BY date_label ASC
+		`, pageID)
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var dsName, dateLabel string
+				var val float64
+				if rows.Scan(&dsName, &dateLabel, &val) != nil {
+					continue
+				}
+				pt := TimeSeriesPoint{Date: dateLabel, Value: val}
+				switch dsName {
+				case "portcalls", "vessel_traffic_monthly":
+					ts.Portcalls = append(ts.Portcalls, pt)
+				case "imports", "trade_imports":
+					ts.Imports = append(ts.Imports, pt)
+				case "exports", "trade_exports":
+					ts.Exports = append(ts.Exports, pt)
+				}
+			}
+		}
+	}
+
+	result.Metrics = metrics
+	result.TimeSeries = ts
+	return result, true
+}
+
+// fetchPortWatchFromArcGIS is the legacy ArcGIS proxy path (used when local DB has no data).
+func fetchPortWatchFromArcGIS(result *PortWatchPageResult) (*PortWatchPageResult, error) {
 	if result.PortID == "" {
 		return result, nil
 	}
 
-	// 2. Determine which feature service to query
+	client := getPortWatchClient()
 	isChokepoint := result.PortType == "chokepoint"
 	serviceURL := client.basePortURL
 	if isChokepoint {
 		serviceURL = client.baseChokeURL
 	}
 
-	// 3. Fetch daily data from ArcGIS
 	where := fmt.Sprintf("portid = '%s'", escapeArcGISString(result.PortID))
 	features, err := client.fetchAll(serviceURL, where, "*", "date DESC")
 	if err != nil {
-		log.Printf("[portwatch] FS query error for %s: %v", result.PortID, err)
-		// Return partial result
+		log.Printf("[portwatch] ArcGIS fallback error for %s: %v", result.PortID, err)
 		return result, nil
 	}
 
@@ -415,7 +515,6 @@ func fetchPortWatchData(db *sql.DB, pageID string) (*PortWatchPageResult, error)
 		return result, nil
 	}
 
-	// 4. Process features into metrics
 	metrics := &PortWatchMetrics{}
 	portcallsTS := make([]TimeSeriesPoint, 0)
 	importsTS := make([]TimeSeriesPoint, 0)
@@ -444,20 +543,16 @@ func fetchPortWatchData(db *sql.DB, pageID string) (*PortWatchPageResult, error)
 		}
 
 		if isChokepoint {
-			// Chokepoint has transits/capacity
 			pc := getAttrInt(attrs, "n_total")
 			totalPortcalls += pc
 			portcallsTS = append(portcallsTS, TimeSeriesPoint{Date: date, Value: float64(pc)})
 		} else {
-			// Port has portcalls/imports/exports
 			pc := getAttrInt(attrs, "portcalls")
 			imp := getAttrFloat(attrs, "import")
 			exp := getAttrFloat(attrs, "export")
-
 			totalPortcalls += pc
 			totalImportVal += imp
 			totalExportVal += exp
-
 			portcallsTS = append(portcallsTS, TimeSeriesPoint{Date: date, Value: float64(pc)})
 			if imp > 0 {
 				importsTS = append(importsTS, TimeSeriesPoint{Date: date, Value: imp})
@@ -468,7 +563,6 @@ func fetchPortWatchData(db *sql.DB, pageID string) (*PortWatchPageResult, error)
 		}
 	}
 
-	// Compute averages
 	numDays := len(features)
 	if numDays > 0 {
 		metrics.AvgDailyPortcalls = roundTo1(float64(totalPortcalls) / float64(numDays))

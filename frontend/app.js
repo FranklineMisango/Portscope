@@ -113,7 +113,7 @@
 		const [chokepoints, setChokepoints] = React.useState([]);
 		const [selectedItem, setSelectedItem] = React.useState(null);
 		const [mapMode, setMapMode] = React.useState(() => {
-			try { return window.localStorage.getItem('portscope-map-mode') || 'globe'; } catch (e) { return 'globe'; }
+			try { return window.localStorage.getItem('portscope-map-mode') || '2d'; } catch (e) { return '2d'; }
 		});
 		const [status, setStatus] = React.useState('Connecting to Portscope...');
 		const [monitorActive, setMonitorActive] = React.useState(false);
@@ -130,6 +130,7 @@
 		const analyticsTimerRef = React.useRef(null);
 		const mapRef = React.useRef(null);
 		const mapContainerRef = React.useRef(null);
+		const [mapReady, setMapReady] = React.useState(false);
 		const mapReadyRef = React.useRef(false);
 		const portsRef = React.useRef([]);
 		const chokepointsRef = React.useRef([]);
@@ -197,14 +198,46 @@
 
 		React.useEffect(() => {
 			let alive = true;
+			let fallbackTimer = null;
+			let fallbackLoaded = false;
+
+			function loadGeoJSONFallback() {
+				fallbackLoaded = true;
+				Promise.all([
+					fetch('/data/Ports.geojson').then(r => r.json()),
+					fetch('/data/Chokepoints.geojson').then(r => r.json()),
+				]).then(([portFC, cpFC]) => {
+					setPorts(normalizeFeatureCollection(portFC, 'port'));
+					setChokepoints(normalizeFeatureCollection(cpFC, 'chokepoint'));
+					setStatus(`Loaded ${portFC.features?.length || 0} ports and ${cpFC.features?.length || 0} chokepoints from GeoJSON.`);
+				}).catch(err => {
+					console.warn('GeoJSON fallback failed:', err);
+					setStatus('Could not load port data.');
+				});
+			}
+
 			function connect() {
+				if (fallbackLoaded) return;
 				const ws = new WebSocket(wsUrl('/ws/updates'));
 				wsRef.current = ws;
+
+				// Fallback: if no snapshot received in 4s, load GeoJSON files directly
+				// Only set timer on first connect — don't reset on retries
+				if (!fallbackTimer) {
+					fallbackTimer = setTimeout(() => {
+						if (!alive) return;
+						loadGeoJSONFallback();
+					}, 4000);
+				}
+
 				ws.onopen = () => { if (alive) setStatus('Connected. Loading snapshot...'); };
 				ws.onmessage = (event) => {
 					try {
 						const msg = JSON.parse(event.data);
 						if (msg.type === 'snapshot') {
+							// Got snapshot from API — cancel fallback
+							if (fallbackTimer) clearTimeout(fallbackTimer);
+							fallbackTimer = null;
 							setPorts(normalizeFeatureCollection({ features: (msg.ports || []).map(item => ({ properties: item.source_value || {}, geometry: item.geom })) }, 'port'));
 							setChokepoints(normalizeFeatureCollection({ features: (msg.chokepoints || []).map(item => ({ properties: item.source_value || {}, geometry: item.geom })) }, 'chokepoint'));
 							setStatus(`Loaded ${msg.ports?.length || 0} ports and ${msg.chokepoints?.length || 0} chokepoints.`);
@@ -217,11 +250,13 @@
 					}
 				};
 				ws.onerror = () => { if (alive) setStatus('Control websocket error; retrying...'); };
-				ws.onclose = () => { if (!alive) return; wsRetryRef.current = setTimeout(connect, 2000); };
+				ws.onclose = () => { if (!alive || fallbackLoaded) return; wsRetryRef.current = setTimeout(connect, 2000); };
 			}
 			connect();
 			return () => {
 				alive = false;
+				if (fallbackTimer) clearTimeout(fallbackTimer);
+				fallbackTimer = null;
 				if (wsRetryRef.current) clearTimeout(wsRetryRef.current);
 				try { if (wsRef.current) wsRef.current.close(); } catch (e) {}
 			};
@@ -241,15 +276,16 @@
 				container: mapContainerRef.current,
 				style: {
 					version: 8,
+					glyphs: 'https://fonts.openmaptiles.org/{fontstack}/{range}.pbf',
 					sources: {
 						basemap: {
 							type: 'raster',
 							tiles: [
-								'https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
-								'https://b.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
-								'https://c.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png'
+								'https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png',
+								'https://b.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png',
 							],
 							tileSize: 256,
+							attribution: '&copy; <a href="https://carto.com/attributions">CARTO</a> &copy; <a href="https://openstreetmap.org/copyright">OSM</a>',
 						},
 						ports: { type: 'geojson', data: { type: 'FeatureCollection', features: [] } },
 						chokepoints: { type: 'geojson', data: { type: 'FeatureCollection', features: [] } },
@@ -257,27 +293,44 @@
 					},
 					layers: [{ id: 'basemap', type: 'raster', source: 'basemap' }],
 				},
-				center: [0, 20],
+				center: [10, 15],
 				zoom: 1.7,
 				projection: mapMode === 'globe' ? 'globe' : 'mercator',
-				renderWorldCopies: false,
-				pitch: mapMode === 'globe' ? 35 : 0,
+				renderWorldCopies: true,
+				pitch: mapMode === 'globe' ? 30 : 0,
 				bearing: 0,
+				doubleClickZoom: true,
+				maxZoom: 18,
+				minZoom: 1,
+				fadeDuration: 200,
 			});
 
 			mapRef.current.on('load', () => {
 				mapReadyRef.current = true;
-				try { mapRef.current.setFog({}); } catch (e) {}
+				setMapReady(true);
+
+				// Set globe atmosphere / fog
+				try {
+					mapRef.current.setFog({
+						color: 'rgb(8, 17, 31)',
+						'high-color': 'rgb(36, 52, 92)',
+						'space-color': 'rgb(5, 10, 20)',
+						'horizon-blend': 0.03,
+						'star-intensity': 0.35,
+					});
+				} catch (e) {}
 				mapRef.current.addLayer({
 					id: 'ports-layer',
 					type: 'circle',
 					source: 'ports',
 					paint: {
-						'circle-radius': ['interpolate', ['linear'], ['zoom'], 1, 3, 6, 6, 10, 9],
+						'circle-radius': ['interpolate', ['linear'], ['zoom'], 1, 4, 4, 7, 8, 10, 12, 14],
 						'circle-color': '#8a7dff',
-						'circle-stroke-color': '#08111f',
-						'circle-stroke-width': 1,
-						'circle-opacity': 0.96,
+						'circle-blur': 0.25,
+						'circle-stroke-color': '#b8b0ff',
+						'circle-stroke-width': ['interpolate', ['linear'], ['zoom'], 1, 0.5, 6, 1.5, 12, 2],
+						'circle-stroke-opacity': 0.6,
+						'circle-opacity': 0.92,
 					},
 				});
 				mapRef.current.addLayer({
@@ -286,14 +339,17 @@
 					source: 'ports',
 					layout: {
 						'text-field': ['get', 'name'],
-						'text-size': 10,
-						'text-offset': [0, 1.2],
+						'text-size': 11,
+						'text-offset': [0, 1.3],
 						'text-anchor': 'top',
+						'text-optional': true,
+						'text-max-width': 8,
 					},
 					paint: {
 						'text-color': '#eef4ff',
-						'text-halo-color': '#08111f',
-						'text-halo-width': 1.1,
+						'text-halo-color': 'rgba(8,17,31,0.85)',
+						'text-halo-width': 1.5,
+						'text-halo-blur': 0.5,
 					},
 				});
 				mapRef.current.addLayer({
@@ -301,11 +357,32 @@
 					type: 'circle',
 					source: 'chokepoints',
 					paint: {
-						'circle-radius': ['interpolate', ['linear'], ['zoom'], 1, 2.5, 6, 5, 10, 8],
+						'circle-radius': ['interpolate', ['linear'], ['zoom'], 1, 3.5, 4, 6, 8, 9, 12, 13],
 						'circle-color': '#ff8a5b',
-						'circle-stroke-color': '#08111f',
-						'circle-stroke-width': 1,
-						'circle-opacity': 0.96,
+						'circle-blur': 0.2,
+						'circle-stroke-color': '#ffb896',
+						'circle-stroke-width': ['interpolate', ['linear'], ['zoom'], 1, 0.5, 6, 1.5, 12, 2],
+						'circle-stroke-opacity': 0.5,
+						'circle-opacity': 0.92,
+					},
+				});
+				mapRef.current.addLayer({
+					id: 'chokepoints-labels',
+					type: 'symbol',
+					source: 'chokepoints',
+					layout: {
+						'text-field': ['get', 'name'],
+						'text-size': 10,
+						'text-offset': [0, 1.3],
+						'text-anchor': 'top',
+						'text-optional': true,
+						'text-max-width': 10,
+					},
+					paint: {
+						'text-color': '#ffd5b8',
+						'text-halo-color': 'rgba(8,17,31,0.85)',
+						'text-halo-width': 1.5,
+						'text-halo-blur': 0.5,
 					},
 				});
 				mapRef.current.addLayer({
@@ -313,11 +390,13 @@
 					type: 'circle',
 					source: 'ships',
 					paint: {
-						'circle-radius': ['interpolate', ['linear'], ['zoom'], 2, 4, 7, 7, 12, 11],
+						'circle-radius': ['interpolate', ['linear'], ['zoom'], 2, 3.5, 5, 6, 10, 9, 14, 13],
 						'circle-color': '#76e4b5',
-						'circle-stroke-color': '#08111f',
-						'circle-stroke-width': 1,
-						'circle-opacity': 0.97,
+						'circle-blur': 0.15,
+						'circle-stroke-color': '#bef5db',
+						'circle-stroke-width': ['interpolate', ['linear'], ['zoom'], 1, 0.5, 7, 1.5, 14, 2],
+						'circle-stroke-opacity': 0.5,
+						'circle-opacity': 0.95,
 					},
 				});
 				mapRef.current.addLayer({
@@ -327,13 +406,16 @@
 					layout: {
 						'text-field': ['coalesce', ['get', 'ship_name'], ['to-string', ['get', 'mmsi']]],
 						'text-size': 10,
-						'text-offset': [0, 1.35],
+						'text-offset': [0, 1.4],
 						'text-anchor': 'top',
+						'text-optional': true,
+						'text-max-width': 6,
 					},
 					paint: {
 						'text-color': '#eef4ff',
-						'text-halo-color': '#08111f',
-						'text-halo-width': 1.2,
+						'text-halo-color': 'rgba(8,17,31,0.85)',
+						'text-halo-width': 1.5,
+						'text-halo-blur': 0.5,
 					},
 				});
 
@@ -407,7 +489,7 @@
 			} catch (e) {
 				console.warn('map source update failed', e);
 			}
-		}, [ports, chokepoints, aisShips]);
+		}, [ports, chokepoints, aisShips, mapReady]);
 
 		React.useEffect(() => {
 			if (!mapRef.current || !mapReadyRef.current) return;

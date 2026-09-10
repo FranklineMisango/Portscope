@@ -8,7 +8,6 @@
   </head>
   <body>
     <div id="app">Loading...</div>
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <style>
       :root {
         color-scheme: dark;
@@ -253,32 +252,40 @@
         z-index: 1;
       }
 
-      .leaflet-container {
-        background: #dbe7f3;
-      }
-
       .map-shell {
         position: relative;
         height: 100%;
         min-height: 0;
         overflow: hidden;
-        background: radial-gradient(circle at 50% 50%, rgba(99, 214, 255, 0.08), transparent 45%), #dbe7f3;
+        background: #050a14;
       }
 
       .map-shell #map {
-        transition: opacity 180ms ease, filter 180ms ease, transform 180ms ease;
+        position: absolute;
+        inset: 0;
+        transition: opacity 180ms ease, filter 180ms ease;
       }
 
       .map-shell.is-loading #map {
-        opacity: 0.25;
-        filter: saturate(0.85) blur(0.2px);
-        transform: scale(0.996);
+        opacity: 0.4;
+        filter: saturate(0.85) blur(0.3px);
       }
 
       .map-shell.is-ready #map {
         opacity: 1;
         filter: none;
-        transform: scale(1);
+      }
+
+      .maplibregl-ctrl-attrib {
+        font-size: 9px !important;
+        background: rgba(8, 17, 31, 0.7) !important;
+        backdrop-filter: blur(4px);
+        border-radius: 4px 0 0 0;
+        padding: 2px 6px !important;
+        color: rgba(255,255,255,0.55) !important;
+      }
+      .maplibregl-ctrl-attrib a {
+        color: rgba(255,255,255,0.55) !important;
       }
 
       .map-header {
@@ -554,8 +561,6 @@
     </style>
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-    <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
     <link href="https://unpkg.com/maplibre-gl@2.4.0/dist/maplibre-gl.css" rel="stylesheet" />
     <script src="https://unpkg.com/maplibre-gl@2.4.0/dist/maplibre-gl.js"></script>
     <script src="/app.js?v=5"></script>
