@@ -109,6 +109,25 @@ services:
     ports:
       - "8080:8080"
 
+  # ═══════════════════════════════════════════════════════
+  # NEW: Python FastAPI backend  (replaces Go api/ eventually)
+  # ═══════════════════════════════════════════════════════
+  backend:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    environment:
+      - POSTGRES_DSN=postgres://postgres:postgres@db:5432/postgres?sslmode=disable
+      - REDIS_URL=redis://redis:6379/0
+      - AISSTREAM_API_KEY=${AISSTREAM_API_KEY}
+      - API_HOST=0.0.0.0
+      - API_PORT=8000
+    depends_on:
+      - db
+      - db-migrate
+    ports:
+      - "8000:8000"
+
   frontend:
     build:
       context: ..

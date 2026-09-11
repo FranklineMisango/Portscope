@@ -1,6 +1,18 @@
-# any env file in the codebase
-**.env
+# Environment & Configuration Files
+.env
+*.env
 ingest/.env
-**__pycache__/
+
+# Dependencies
+node_modules/
+
+# Python & Runtime Cache
+__pycache__/
 *.log
+
+# Project Rules & Testing
+.clinerules
 /Testing/
+*src
+*build
+*.svelte*
